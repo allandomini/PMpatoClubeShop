@@ -1,0 +1,438 @@
+# ==========================================================
+# KubeShop - Pipeline de infraestrutura (Microsoft Azure)
+#
+# Actions → "Infra - operar" → Run workflow → escolha a ação:
+#
+#   planejar       terraform plan (mostra o que mudaria; não altera nada)
+#   provisionar    plan → aprovação → apply → Ansible completo → verificação
+#   configurar     Ansible completo (atualiza VMs/serviços) → verificação
+#   implantar-app  nova versão da aplicação → verificação
+#   verificar      saúde, isolamento do banco e smoke test
+#   desativar      backup final → destrói VMs e rede (preserva dados)
+#
+# Ambientes do GitHub (Settings → Environments):
+#   producao             exige aprovação antes de alterar a nuvem
+#   producao-destrutivo  exige aprovação para desativar/restaurar
+#
+# Também pode ser chamado pelo CI/CD da aplicação (workflow_call)
+# com acao=implantar-app; veja o README.
+# ==========================================================
+name: Infra - operar
+
+on:
+  workflow_dispatch:
+    inputs:
+      acao:
+        description: Operação
+        type: choice
+        required: true
+        default: planejar
+        options:
+          - planejar
+          - provisionar
+          - configurar
+          - implantar-app
+          - verificar
+          - desativar
+      confirmacao:
+        description: Para "desativar", digite DESATIVAR
+        type: string
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      acao:
+        description: implantar-app ou verificar
+        type: string
+        required: true
+      ref:
+        description: "Commit/tag a implantar (padrão: o do chamador)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# Nunca duas operações ao mesmo tempo no mesmo ambiente. O estado do
+# Terraform também tem trava nativa (lease do Blob), mas a fila evita
+# que uma execução espere ou falhe por causa de outra.
+concurrency:
+  group: kubeshop-infra-producao
+  cancel-in-progress: false
+
+env:
+  ANSIBLE_CONFIG: ${{ github.workspace }}/ansible/ansible.cfg
+
+jobs:
+  # --------------------------------------------------------
+  plan:
+    name: Planejar (terraform plan)
+    if: contains(fromJSON('["planejar","provisionar"]'), inputs.acao)
+    runs-on: ubuntu-24.04
+    outputs:
+      add: ${{ steps.resumo.outputs.add }}
+      change: ${{ steps.resumo.outputs.change }}
+      destroy: ${{ steps.resumo.outputs.destroy }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      - name: Validação
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform validate -no-color
+
+      - name: Plano
+        working-directory: terraform
+        run: terraform plan -out=tfplan -no-color | tee plan.txt
+
+      - name: Resumo do plano
+        id: resumo
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform show -json tfplan > plan.json
+          count() { jq "[.resource_changes[]? | select(.change.actions | index(\"$1\"))] | length" plan.json; }
+          add="$(count create)"; change="$(count update)"; destroy="$(count delete)"
+          {
+            echo "add=${add}"
+            echo "change=${change}"
+            echo "destroy=${destroy}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Plano do Terraform"
+            echo ""
+            echo "| Criar | Alterar | Destruir |"
+            echo "|---|---|---|"
+            echo "| ${add} | ${change} | ${destroy} |"
+            echo ""
+            echo "<details><summary>Plano completo</summary>"
+            echo ""
+            echo '```'
+            sed -n '/Terraform will perform/,$p' plan.txt | head -n 400
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------
+  apply:
+    name: Provisionar (terraform apply)
+    needs: plan
+    if: inputs.acao == 'provisionar'
+    runs-on: ubuntu-24.04
+    environment: producao
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      # O plano aprovado não é guardado como artefato (pode conter
+      # valores sensíveis). Planejamos de novo e só aplicamos se as
+      # quantidades forem iguais às aprovadas.
+      - name: Replaneja e confere com o plano aprovado
+        working-directory: terraform
+        env:
+          APROVADO: "${{ needs.plan.outputs.add }}/${{ needs.plan.outputs.change }}/${{ needs.plan.outputs.destroy }}"
+        run: |
+          set -euo pipefail
+          terraform plan -out=tfplan -no-color >/dev/null
+          terraform show -json tfplan > plan.json
+          count() { jq "[.resource_changes[]? | select(.change.actions | index(\"$1\"))] | length" plan.json; }
+          atual="$(count create)/$(count update)/$(count delete)"
+          echo "Aprovado (criar/alterar/destruir): ${APROVADO} | Atual: ${atual}"
+          if [[ "${atual}" != "${APROVADO}" ]]; then
+            echo "::error::O plano mudou desde a aprovação. Rode 'planejar' novamente."
+            exit 1
+          fi
+
+      - name: Aplica
+        working-directory: terraform
+        run: terraform apply -no-color -auto-approve tfplan
+
+      - name: Inventário dos recursos
+        working-directory: terraform
+        run: |
+          {
+            echo "## Recursos provisionados"
+            echo '```json'
+            terraform output -json inventory | jq .
+            echo '```'
+            echo "Loja: $(terraform output -raw store_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------
+  configurar:
+    name: Configurar VMs (Ansible site.yml)
+    needs: apply
+    if: >-
+      always()
+      && contains(fromJSON('["provisionar","configurar"]'), inputs.acao)
+      && contains(fromJSON('["success","skipped"]'), needs.apply.result)
+    runs-on: ubuntu-24.04
+    environment: producao
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      - uses: ./.github/actions/preparar-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          mongo-root-password: ${{ secrets.KUBESHOP_MONGO_ROOT_PASSWORD }}
+          mongo-app-password: ${{ secrets.KUBESHOP_MONGO_APP_PASSWORD }}
+
+      - name: Executa o site.yml
+        working-directory: ansible
+        run: |
+          set -o pipefail
+          ansible-playbook site.yml | tee ../ansible-site.log
+
+      - name: Fecha o SSH temporário
+        if: always()
+        run: bash .github/scripts/acesso-ssh.sh fechar
+
+      - name: Guarda o registro da execução
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ansible-site-${{ github.run_id }}
+          path: ansible-site.log
+          if-no-files-found: ignore
+          retention-days: 90
+
+  # --------------------------------------------------------
+  implantar-app:
+    name: Implantar aplicação (site.yml --tags app)
+    if: inputs.acao == 'implantar-app'
+    runs-on: ubuntu-24.04
+    environment: producao
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      - uses: ./.github/actions/preparar-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          mongo-root-password: ${{ secrets.KUBESHOP_MONGO_ROOT_PASSWORD }}
+          mongo-app-password: ${{ secrets.KUBESHOP_MONGO_APP_PASSWORD }}
+
+      - name: Implanta a versão ${{ inputs.ref || github.sha }}
+        working-directory: ansible
+        run: |
+          set -o pipefail
+          ansible-playbook site.yml --tags app | tee ../ansible-app.log
+
+      - name: Fecha o SSH temporário
+        if: always()
+        run: bash .github/scripts/acesso-ssh.sh fechar
+
+      - name: Guarda o registro da execução
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ansible-app-${{ github.run_id }}
+          path: ansible-app.log
+          if-no-files-found: ignore
+          retention-days: 90
+
+  # --------------------------------------------------------
+  verificar:
+    name: Verificar (saúde, isolamento, smoke)
+    needs: [configurar, implantar-app]
+    if: >-
+      always()
+      && contains(fromJSON('["provisionar","configurar","implantar-app","verificar"]'), inputs.acao)
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      - uses: ./.github/actions/preparar-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          mongo-root-password: ${{ secrets.KUBESHOP_MONGO_ROOT_PASSWORD }}
+          mongo-app-password: ${{ secrets.KUBESHOP_MONGO_APP_PASSWORD }}
+
+      - name: Saúde e isolamento do banco
+        working-directory: ansible
+        run: ansible-playbook site.yml --tags verificar
+
+      - name: Endereços em que o MongoDB escuta
+        working-directory: ansible
+        run: ansible db -m ansible.builtin.command -a "ss -ltn sport = :27017"
+
+      - name: Smoke test pela internet
+        run: |
+          set -o pipefail
+          node roteiros/smoke.mjs "$KUBESHOP_STORE_URL" | tee smoke.txt
+          {
+            echo "## Smoke test"
+            echo '```'
+            cat smoke.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fecha o SSH temporário
+        if: always()
+        run: bash .github/scripts/acesso-ssh.sh fechar
+
+  # --------------------------------------------------------
+  desativar:
+    name: Desativar ambiente (preserva dados)
+    if: inputs.acao == 'desativar'
+    runs-on: ubuntu-24.04
+    environment: producao-destrutivo
+    steps:
+      - name: Confere a confirmação
+        env:
+          CONFIRMACAO: ${{ inputs.confirmacao }}
+        run: |
+          if [[ "${CONFIRMACAO}" != "DESATIVAR" ]]; then
+            echo "::error::Para desativar, informe confirmacao = DESATIVAR."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      - uses: ./.github/actions/preparar-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          mongo-root-password: ${{ secrets.KUBESHOP_MONGO_ROOT_PASSWORD }}
+          mongo-app-password: ${{ secrets.KUBESHOP_MONGO_APP_PASSWORD }}
+
+      # Sem backup final bem-sucedido, nada é destruído.
+      - name: Backup final (enviado ao Blob Storage)
+        working-directory: ansible
+        run: ansible-playbook backup.yml
+
+      - name: Fecha o SSH temporário (antes de remover a NSG)
+        run: bash .github/scripts/acesso-ssh.sh fechar
+
+      # O disco de dados, a conta de backups e o grupo de recursos que os
+      # contém saem do estado do Terraform: continuam existindo no Azure e
+      # não são destruídos (o grupo de recursos nunca é apagado com algo
+      # dentro; o provedor também recusaria).
+      - name: Preserva o disco de dados, os backups e o grupo de recursos
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform state list \
+            | grep -E '^(azurerm_managed_disk\.mongo_data|azurerm_storage_account\.backups|azurerm_storage_container\.backups|azurerm_resource_group\.main)$' \
+            | while read -r address; do
+                echo "Preservando: ${address}"
+                terraform state rm "${address}"
+              done
+
+      - name: Mostra o que será destruído
+        working-directory: terraform
+        run: terraform plan -destroy -no-color
+
+      - name: Destrói VMs e rede
+        working-directory: terraform
+        run: terraform destroy -auto-approve -no-color
+
+      - name: Garante que o SSH temporário foi fechado
+        if: always()
+        run: bash .github/scripts/acesso-ssh.sh fechar
+
+      - name: O que continua na conta
+        run: |
+          {
+            echo "## Ambiente desativado"
+            echo ""
+            echo "Destruídos: VMs, discos de sistema, rede (VNet, sub-redes, NAT Gateway, IPs públicos, NSGs)."
+            echo ""
+            echo "**Continuam existindo (podem gerar custo):**"
+            echo "- Grupo de recursos \`kubeshop-rg\`, com o disco de dados \`kubeshop-mongo-data\` e a conta de armazenamento dos backups"
+            echo "- Contêiner de backups com os dumps do MongoDB (inclui o backup final desta execução)"
+            echo "- Conta de armazenamento do estado do Terraform"
+            echo ""
+            echo "Para apagá-los, siga README → Desativação."
+          } >> "$GITHUB_STEP_SUMMARY"

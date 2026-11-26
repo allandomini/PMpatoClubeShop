@@ -1,0 +1,128 @@
+# ==========================================================
+# KubeShop - Backup e restauração do MongoDB
+#
+# O backup automático roda na própria VM do banco (systemd timer,
+# 03:00 de Brasília). Este pipeline:
+#
+#   - todo dia às 07:00 de Brasília confere se o backup da madrugada
+#     existe (falha e notifica a equipe se não existir);
+#   - sob demanda: backup agora, listar, verificar ou restaurar.
+#
+# Restaurar SUBSTITUI os pedidos atuais: exige o ambiente
+# "producao-destrutivo" e confirmacao = SIM.
+# ==========================================================
+name: Infra - backup
+
+on:
+  schedule:
+    - cron: "0 10 * * *"   # 10:00 UTC = 07:00 em Brasília
+  workflow_dispatch:
+    inputs:
+      acao:
+        description: Operação
+        type: choice
+        required: true
+        default: backup
+        options:
+          - backup
+          - listar
+          - verificar
+          - restaurar
+      origem:
+        description: De onde restaurar
+        type: choice
+        default: local
+        options:
+          - local
+          - bucket
+      arquivo:
+        description: Dump a restaurar (nome ou "latest"; do bucket, informe o nome)
+        type: string
+        default: latest
+      confirmacao:
+        description: Para restaurar, digite SIM
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubeshop-infra-producao
+  cancel-in-progress: false
+
+env:
+  ANSIBLE_CONFIG: ${{ github.workspace }}/ansible/ansible.cfg
+  ACAO: ${{ inputs.acao || 'verificar' }}
+
+jobs:
+  rotina:
+    name: Backup - ${{ inputs.acao || 'verificar (agendado)' }}
+    runs-on: ubuntu-24.04
+    # Restauração exige aprovação no ambiente destrutivo.
+    environment: ${{ inputs.acao == 'restaurar' && 'producao-destrutivo' || 'producao-leitura' }}
+    steps:
+      - name: Confere a confirmação da restauração
+        if: inputs.acao == 'restaurar'
+        env:
+          CONFIRMACAO: ${{ inputs.confirmacao }}
+        run: |
+          if [[ "${CONFIRMACAO}" != "SIM" ]]; then
+            echo "::error::A restauração substitui os dados atuais. Informe confirmacao = SIM."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/preparar-azure
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          state-container: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          location: ${{ vars.AZURE_LOCATION || 'brazilsouth' }}
+          ssh-public-key: ${{ vars.SSH_PUBLIC_KEY }}
+          admin-cidrs: ${{ vars.ADMIN_CIDRS }}
+          backup-storage-account: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+
+      - uses: ./.github/actions/preparar-ansible
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          mongo-root-password: ${{ secrets.KUBESHOP_MONGO_ROOT_PASSWORD }}
+          mongo-app-password: ${{ secrets.KUBESHOP_MONGO_APP_PASSWORD }}
+
+      - name: Executa backup.yml (${{ env.ACAO }})
+        working-directory: ansible
+        env:
+          ORIGEM: ${{ inputs.origem || 'local' }}
+          ARQUIVO: ${{ inputs.arquivo || 'latest' }}
+          CONFIRMACAO: ${{ inputs.confirmacao }}
+        run: |
+          set -o pipefail
+          extra=(-e "acao=${ACAO}")
+          if [[ "${ACAO}" == "restaurar" ]]; then
+            extra+=(-e "origem=${ORIGEM}" -e "arquivo=${ARQUIVO}" -e "confirmar=${CONFIRMACAO}")
+          fi
+          ansible-playbook backup.yml "${extra[@]}" | tee ../backup.log
+          {
+            echo "## Backup - ${ACAO}"
+            echo '```'
+            grep -E "BACKUP_OK|RESTORE_OK|OK: |pedido\(s\)|kubeshop-[0-9a-z-]+\.archive\.gz|failed=" ../backup.log | head -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fecha o SSH temporário
+        if: always()
+        run: bash .github/scripts/acesso-ssh.sh fechar
+
+      - name: Guarda o registro da execução
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backup-${{ env.ACAO }}-${{ github.run_id }}
+          path: backup.log
+          if-no-files-found: ignore
+          retention-days: 90

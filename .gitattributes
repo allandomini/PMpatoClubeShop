@@ -1,0 +1,15 @@
+# Normaliza finais de linha para LF no repositório.
+* text=auto eol=lf
+
+# Scripts de shell precisam de LF para rodar no Linux/macOS.
+*.sh   text eol=lf
+
+# Scripts do PowerShell seguem o padrão do Windows.
+*.ps1  text eol=crlf
+
+# Arquivos binários.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.pdf  binary
+*.woff2 binary

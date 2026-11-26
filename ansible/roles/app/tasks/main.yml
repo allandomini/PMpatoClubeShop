@@ -1,0 +1,117 @@
+# ==========================================================
+# Role app - Nginx + React + API na VM da aplicação
+#
+# Por padrão envia o código do commit atual (git archive) e
+# constrói as imagens na VM. Com app_use_registry_images=true,
+# usa as imagens publicadas pelo CI/CD da aplicação.
+# ==========================================================
+
+- name: Confere se a senha da API foi informada
+  ansible.builtin.assert:
+    that: mongo_app_password | length >= 16
+    fail_msg: "Defina KUBESHOP_MONGO_APP_PASSWORD (mínimo de 16 caracteres)."
+    quiet: true
+  no_log: true
+
+- name: Cria os diretórios da aplicação
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ app_base_dir }}", mode: "0755" }
+    - { path: "{{ app_base_dir }}/releases", mode: "0755" }
+    - { path: "{{ app_base_dir }}/secrets", mode: "0755" }
+
+# O usuário "node" da imagem da API tem UID 1000.
+- name: Grava a senha da API
+  ansible.builtin.copy:
+    dest: "{{ app_base_dir }}/secrets/mongo_app_password"
+    content: "{{ mongo_app_password }}"
+    owner: "1000"
+    group: "1000"
+    mode: "0400"
+  no_log: true
+  register: app_secret
+
+# ----------------------------------------------------------
+# Código-fonte (somente quando as imagens são construídas aqui)
+# ----------------------------------------------------------
+- name: Envia o código da versão {{ kubeshop_version }}
+  when: not app_use_registry_images
+  block:
+    # O módulo git só clona repositórios; "git archive" não tem equivalente.
+    - name: Empacota o commit atual (somente arquivos versionados)  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: >-
+          git archive --format=tar.gz
+          -o {{ playbook_dir }}/.kubeshop-{{ kubeshop_version }}.tar.gz
+          HEAD aplicativos
+        chdir: "{{ playbook_dir }}/.."
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+
+    - name: Cria a pasta da versão
+      ansible.builtin.file:
+        path: "{{ app_base_dir }}/releases/{{ kubeshop_version }}"
+        state: directory
+        mode: "0755"
+
+    - name: Extrai o código na VM
+      ansible.builtin.unarchive:
+        src: "{{ playbook_dir }}/.kubeshop-{{ kubeshop_version }}.tar.gz"
+        dest: "{{ app_base_dir }}/releases/{{ kubeshop_version }}"
+        creates: "{{ app_base_dir }}/releases/{{ kubeshop_version }}/aplicativos"
+
+    - name: Remove o pacote temporário local
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/.kubeshop-{{ kubeshop_version }}.tar.gz"
+        state: absent
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Aponta "current" para a versão implantada
+      ansible.builtin.file:
+        src: "{{ app_base_dir }}/releases/{{ kubeshop_version }}"
+        dest: "{{ app_base_dir }}/current"
+        state: link
+        force: true
+
+# ----------------------------------------------------------
+# Serviços
+# ----------------------------------------------------------
+- name: Gera o compose da aplicação
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ app_base_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Constrói (se necessário) e sobe a aplicação
+  ansible.builtin.command:
+    cmd: >-
+      docker compose up -d --remove-orphans --wait --wait-timeout 240
+      {{ '--pull always' if app_use_registry_images else '--build' }}
+      {{ '--force-recreate' if app_secret is changed else '' }}
+    chdir: "{{ app_base_dir }}"
+  register: app_up
+  changed_when: "'Recreated' in app_up.stderr or 'Started' in app_up.stderr or 'Created' in app_up.stderr"
+
+- name: Mantém apenas as 3 versões mais recentes do código
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd {{ app_base_dir }}/releases
+    ls -1t | grep -vx "{{ kubeshop_version }}" | tail -n +3 | xargs -r rm -rf --
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Remove imagens antigas sem uso
+  ansible.builtin.command: docker image prune -f --filter "until=168h"
+  changed_when: false

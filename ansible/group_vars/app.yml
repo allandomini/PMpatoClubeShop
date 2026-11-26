@@ -1,0 +1,17 @@
+# ==========================================================
+# KubeShop - VM da aplicação (Nginx + React + API)
+# ==========================================================
+
+app_base_dir: /opt/kubeshop
+
+# Porta pública da loja (Nginx do container "web" escuta em 8080).
+app_public_port: 80
+
+# Integração com o CI/CD existente:
+# - false: o Ansible envia o código do commit atual e as imagens
+#          são construídas na própria VM (padrão).
+# - true:  o CI/CD publica as imagens em um registro e informa as
+#          referências abaixo (ex.: ghcr.io/org/kubeshop-api:1.4.0).
+app_use_registry_images: false
+app_api_image: "kubeshop-api:{{ kubeshop_version }}"
+app_web_image: "kubeshop-web:{{ kubeshop_version }}"

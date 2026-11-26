@@ -1,0 +1,152 @@
+# ==========================================================
+# Role mongodb - MongoDB autenticado na VM exclusiva
+#
+# - Dados no volume em bloco do Terraform (sobrevive à VM).
+# - Container com rede do host, escutando só em 127.0.0.1 e no
+#   IP privado; o NSG da sub-rede aceita a porta só a partir da app.
+# - Usuário root só para administração/backup; a API usa um
+#   usuário com readWrite apenas no banco kubeshop.
+# ==========================================================
+
+- name: Confere se as senhas do MongoDB foram informadas
+  ansible.builtin.assert:
+    that:
+      - mongo_root_password | length >= 16
+      - mongo_app_password | length >= 16
+    fail_msg: >-
+      Defina KUBESHOP_MONGO_ROOT_PASSWORD e KUBESHOP_MONGO_APP_PASSWORD
+      (mínimo de 16 caracteres) no ambiente de quem executa o Ansible.
+    quiet: true
+  no_log: true
+
+# ----------------------------------------------------------
+# Volume de dados
+# ----------------------------------------------------------
+- name: Aguarda o volume de dados aparecer na VM
+  ansible.builtin.wait_for:
+    path: "{{ mongo_device }}"
+    timeout: 300
+
+- name: Verifica se o volume já possui sistema de arquivos
+  ansible.builtin.command: blkid -o value -s TYPE {{ mongo_device }}
+  register: mongodb_fs_type
+  changed_when: false
+  failed_when: false
+
+# Só formata um volume VAZIO. Nunca apaga dados existentes.
+- name: Formata o volume (somente na primeira vez)
+  ansible.builtin.command: mkfs.ext4 -L mongodata {{ mongo_device }}
+  when: mongodb_fs_type.stdout | trim == ""
+  changed_when: true
+
+- name: Obtém o UUID do volume
+  ansible.builtin.command: blkid -o value -s UUID {{ mongo_device }}
+  register: mongodb_fs_uuid
+  changed_when: false
+
+- name: Cria o ponto de montagem
+  ansible.builtin.file:
+    path: "{{ mongo_mount_point }}"
+    state: directory
+    mode: "0755"
+
+# nofail: a VM inicia mesmo se o disco de dados demorar a aparecer (ex.: após troca de VM).
+- name: Registra a montagem no /etc/fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '\s{{ mongo_mount_point }}\s'
+    line: "UUID={{ mongodb_fs_uuid.stdout | trim }} {{ mongo_mount_point }} ext4 defaults,_netdev,nofail 0 2"
+  register: mongodb_fstab
+
+# O módulo mount fica na coleção ansible.posix; o comando evita exigir
+# coleções extras além do ansible-core.
+- name: Monta o volume  # noqa: command-instead-of-module
+  ansible.builtin.command: mount {{ mongo_mount_point }}
+  when: mongodb_fstab is changed or not (ansible_facts['mounts'] | selectattr('mount', 'equalto', mongo_mount_point) | list)
+  changed_when: true
+  register: mongodb_mount
+  failed_when: mongodb_mount.rc != 0 and 'already mounted' not in mongodb_mount.stderr
+
+# O usuário "mongodb" do container oficial tem UID/GID 999.
+- name: Cria os diretórios de dados e backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "999"
+    group: "999"
+    mode: "0750"
+  loop:
+    - "{{ mongo_data_dir }}"
+    - "{{ backup_dir }}"
+
+# ----------------------------------------------------------
+# Arquivos do serviço
+# ----------------------------------------------------------
+- name: Cria os diretórios do serviço
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ db_base_dir }}", mode: "0755" }
+    - { path: "{{ db_base_dir }}/scripts", mode: "0755" }
+    - { path: "{{ db_base_dir }}/secrets", mode: "0700" }
+
+- name: Copia os scripts de inicialização e saúde do MongoDB
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../docker/mongodb/{{ item }}"
+    dest: "{{ db_base_dir }}/scripts/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - init.js
+    - healthcheck.js
+
+- name: Grava os segredos do MongoDB
+  ansible.builtin.copy:
+    dest: "{{ db_base_dir }}/secrets/{{ item.name }}"
+    content: "{{ item.value }}"
+    owner: "999"
+    group: "999"
+    mode: "0400"
+  loop:
+    - { name: mongo_root_password, value: "{{ mongo_root_password }}" }
+    - { name: mongo_app_password, value: "{{ mongo_app_password }}" }
+    # Arquivo de configuração do mongodump/mongorestore (--config),
+    # para a senha não aparecer na lista de processos.
+    - { name: mongo_tools.yaml, value: "password: {{ mongo_root_password | to_json }}\n" }
+  no_log: true
+
+- name: Gera o compose do MongoDB
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ db_base_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: mongodb_compose
+
+- name: Sobe o MongoDB e aguarda ficar saudável
+  ansible.builtin.command:
+    cmd: docker compose up -d --wait --wait-timeout 180
+    chdir: "{{ db_base_dir }}"
+  register: mongodb_up
+  changed_when: "'Started' in mongodb_up.stderr or 'Recreated' in mongodb_up.stderr or 'Created' in mongodb_up.stderr"
+
+- name: Confere que o MongoDB NÃO escuta em todas as interfaces
+  ansible.builtin.shell: |
+    set -o pipefail
+    ss -ltnH "sport = :{{ mongo_port }}" | awk '{print $4}'
+  args:
+    executable: /bin/bash
+  register: mongodb_listen
+  changed_when: false
+  failed_when: >-
+    mongodb_listen.stdout_lines | select('search', '^(0\.0\.0\.0|\*|\[::\]):') | list | length > 0
+
+- name: Endereços em que o MongoDB escuta (evidência REQ-02)
+  ansible.builtin.debug:
+    var: mongodb_listen.stdout_lines

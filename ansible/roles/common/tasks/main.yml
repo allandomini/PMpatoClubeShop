@@ -1,0 +1,58 @@
+# ==========================================================
+# Role common - Preparação básica de qualquer VM
+# ==========================================================
+
+- name: Confere se a VM é Ubuntu
+  ansible.builtin.assert:
+    that: ansible_facts['distribution'] == 'Ubuntu'
+    fail_msg: "Este playbook foi feito para Ubuntu (imagem padrão do Terraform)."
+    quiet: true
+
+- name: Atualiza a lista de pacotes
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Instala pacotes básicos
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gzip
+      - jq
+      - unattended-upgrades
+    state: present
+
+- name: Aplica atualizações de segurança pendentes
+  ansible.builtin.apt:
+    upgrade: safe
+  register: common_upgrade
+  changed_when: "'0 upgraded' not in (common_upgrade.stdout | default(''))"
+
+- name: Consulta o fuso horário atual
+  ansible.builtin.command: timedatectl show --property=Timezone --value
+  register: common_timezone
+  changed_when: false
+
+- name: Define o fuso horário
+  ansible.builtin.command: timedatectl set-timezone {{ kubeshop_timezone }}
+  when: common_timezone.stdout != kubeshop_timezone
+  changed_when: true
+
+# ----------------------------------------------------------
+# SSH: somente chave, sem login de root (REQ-04)
+# ----------------------------------------------------------
+- name: Reforça a configuração do SSH
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-kubeshop.conf
+    content: |
+      # Gerenciado pelo Ansible (KubeShop)
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      MaxAuthTries 3
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Recarrega o SSH

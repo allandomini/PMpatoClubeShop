@@ -1,230 +1,206 @@
+import { readFileSync } from "node:fs";
 
 /**
- * Catálogo oficial de produtos do KubeShop.
+ * KubeShop - Configuração da API
  *
- * O catálogo é mantido diretamente na API, conforme o escopo
- * do projeto. Não existe consulta ao MongoDB para carregar produtos.
+ * Lê as configurações a partir de variáveis de ambiente.
+ * Nenhuma credencial possui valor padrão no código.
  *
- * Os preços são armazenados em centavos para evitar problemas
- * de precisão com valores monetários.
+ * Variáveis suportadas:
+ *
+ * Servidor HTTP
+ * - HOST                 Endereço de escuta (padrão: 0.0.0.0)
+ * - PORT                 Porta da API (padrão: 3000)
+ * - APP_VERSION          Versão exibida em /api/info (padrão: 1.0.0)
+ *
+ * MongoDB
+ * - MONGO_HOST           Endereço do banco; em produção, o IP privado
+ *                        da VM do MongoDB (padrão: localhost)
+ * - MONGO_PORT           Porta do banco (padrão: 27017)
+ * - MONGO_DATABASE       Nome do banco (padrão: kubeshop)
+ * - MONGO_AUTH_SOURCE    Banco de autenticação (padrão: MONGO_DATABASE)
+ * - MONGO_USERNAME       Usuário da aplicação
+ * - MONGO_USERNAME_FILE  Arquivo com o usuário (Docker Secret)
+ * - MONGO_PASSWORD       Senha da aplicação
+ * - MONGO_PASSWORD_FILE  Arquivo com a senha (Docker Secret)
+ *
+ * Usuário e senha devem ser informados juntos. Para cada um deles,
+ * use a variável direta ou a variante _FILE, nunca as duas.
+ *
+ * As mensagens de erro nunca incluem valores de credenciais.
  */
 
-export const products = Object.freeze([
-  Object.freeze({
-    id: "headphones",
-    name: "Headphone Orbit",
-    category: "Áudio",
-    description: "Seu foco em outra frequência.",
-    priceCents: 18990,
-    originalPriceCents: 29990,
-    illustration: "headphones",
-    color: "lavender",
-  }),
-
-  Object.freeze({
-    id: "keyboard",
-    name: "Teclado Flow",
-    category: "Setup",
-    description: "Uma boa ideia começa com um toque.",
-    priceCents: 24990,
-    originalPriceCents: 39990,
-    illustration: "keyboard",
-    color: "mint",
-  }),
-
-  Object.freeze({
-    id: "monitor",
-    name: "Monitor Horizon",
-    category: "Setup",
-    description: "Mais espaço para o próximo projeto.",
-    priceCents: 89990,
-    originalPriceCents: 129990,
-    illustration: "monitor",
-    color: "peach",
-  }),
-
-  Object.freeze({
-    id: "backpack",
-    name: "Mochila Deploy",
-    category: "Essenciais",
-    description: "Leve suas ideias para qualquer lugar.",
-    priceCents: 15990,
-    originalPriceCents: 22990,
-    illustration: "backpack",
-    color: "sky",
-  }),
-
-  Object.freeze({
-    id: "mouse",
-    name: "Mouse Vector",
-    category: "Setup",
-    description: "Precisão para explorar novos caminhos.",
-    priceCents: 9990,
-    originalPriceCents: 16990,
-    illustration: "mouse",
-    color: "peach",
-  }),
-
-  Object.freeze({
-    id: "speaker",
-    name: "Speaker Echo",
-    category: "Áudio",
-    description: "O som que acompanha o seu ritmo.",
-    priceCents: 12990,
-    originalPriceCents: 19990,
-    illustration: "speaker",
-    color: "mint",
-  }),
-]);
-
-/**
- * Limites permitidos para a criação de pedidos.
- */
-const ORDER_LIMITS = Object.freeze({
-  minItems: 1,
-  maxItems: 20,
-  minQuantity: 1,
-  maxQuantity: 10,
+const DEFAULTS = Object.freeze({
+  host: "0.0.0.0",
+  port: 3000,
+  version: "1.0.0",
+  mongoHost: "localhost",
+  mongoPort: 27017,
+  database: "kubeshop",
 });
 
 /**
- * Cria um erro de validação HTTP 400.
+ * Cria um erro de configuração.
  */
-function validationError(message) {
+function configError(message) {
   const error = new Error(message);
-  error.statusCode = 400;
+  error.name = "ConfigError";
   return error;
 }
 
 /**
- * Valida os itens enviados pelo frontend e calcula o valor
- * utilizando exclusivamente os preços oficiais do catálogo.
- *
- * Formato esperado:
- *
- * {
- *   items: [
- *     {
- *       productId: "headphones",
- *       quantity: 2
- *     }
- *   ]
- * }
- *
- * O preço enviado pelo frontend, caso exista, é ignorado.
- *
- * @param {Object} body Dados recebidos na requisição.
- * @returns {Object} Pedido validado e normalizado.
+ * Retorna o valor da variável sem espaços nas extremidades,
+ * ou undefined quando ausente ou vazia.
  */
-export function validateOrder(body) {
-  // Verifica se o corpo da requisição é um objeto válido.
-  if (
-    !body ||
-    typeof body !== "object" ||
-    Array.isArray(body)
-  ) {
-    throw validationError("Dados do pedido inválidos");
+function readString(env, name) {
+  const value = env[name];
+
+  if (value === undefined || value === null) {
+    return undefined;
   }
 
-  // Verifica se existe uma lista de produtos.
-  if (!Array.isArray(body.items)) {
-    throw validationError("A lista de itens do pedido é obrigatória");
+  const trimmed = String(value).trim();
+
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Converte e valida uma porta TCP (1 a 65535).
+ */
+function readPort(env, name, fallback) {
+  const raw = readString(env, name);
+
+  if (raw === undefined) {
+    return fallback;
   }
 
-  // Verifica a quantidade de itens enviados.
-  if (
-    body.items.length < ORDER_LIMITS.minItems ||
-    body.items.length > ORDER_LIMITS.maxItems
-  ) {
-    throw validationError(
-      `O pedido deve possuir entre ${ORDER_LIMITS.minItems} e ${ORDER_LIMITS.maxItems} itens`
+  if (!/^\d+$/.test(raw)) {
+    throw configError(`Valor inválido para ${name}: informe um número entre 1 e 65535`);
+  }
+
+  const port = Number(raw);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw configError(`Valor inválido para ${name}: informe um número entre 1 e 65535`);
+  }
+
+  return port;
+}
+
+/**
+ * Lê um segredo pela variável direta ou pelo arquivo indicado
+ * em <NAME>_FILE (formato usado por Docker Secrets).
+ *
+ * O conteúdo do arquivo nunca é incluído nas mensagens de erro.
+ */
+function readSecret(env, name) {
+  const fileVariable = `${name}_FILE`;
+  const direct = readString(env, name);
+  const file = readString(env, fileVariable);
+
+  if (direct !== undefined && file !== undefined) {
+    throw configError(
+      `Informe apenas um entre ${name} e ${fileVariable}`
     );
   }
 
-  const validatedItems = [];
-  const addedProducts = new Set();
+  if (file === undefined) {
+    return direct;
+  }
 
-  let totalCents = 0;
+  let content;
 
-  // Valida individualmente cada item do pedido.
-  for (const item of body.items) {
-    if (
-      !item ||
-      typeof item !== "object" ||
-      Array.isArray(item)
-    ) {
-      throw validationError("Item do pedido inválido");
-    }
-
-    const { productId, quantity } = item;
-
-    // Verifica se o identificador do produto foi informado.
-    if (
-      typeof productId !== "string" ||
-      productId.trim().length === 0
-    ) {
-      throw validationError("Identificador do produto inválido");
-    }
-
-    // Procura o produto no catálogo oficial da API.
-    const product = products.find(
-      (product) => product.id === productId
+  try {
+    content = readFileSync(file, "utf8");
+  } catch {
+    throw configError(
+      `Não foi possível ler o arquivo indicado em ${fileVariable}`
     );
-
-    if (!product) {
-      throw validationError(
-        `Produto não encontrado: ${productId}`
-      );
-    }
-
-    // Verifica se a quantidade é um número inteiro permitido.
-    if (
-      !Number.isInteger(quantity) ||
-      quantity < ORDER_LIMITS.minQuantity ||
-      quantity > ORDER_LIMITS.maxQuantity
-    ) {
-      throw validationError(
-        `Quantidade inválida para o produto ${product.name}`
-      );
-    }
-
-    // Impede que o mesmo produto seja repetido na lista.
-    if (addedProducts.has(productId)) {
-      throw validationError(
-        `O produto ${product.name} foi informado mais de uma vez`
-      );
-    }
-
-    addedProducts.add(productId);
-
-    // Calcula o subtotal usando o preço oficial da API.
-    const subtotalCents = product.priceCents * quantity;
-
-    if (!Number.isSafeInteger(subtotalCents)) {
-      throw validationError("Valor do pedido inválido");
-    }
-
-    totalCents += subtotalCents;
-
-    // Armazena somente os dados necessários para o pedido.
-    validatedItems.push({
-      productId: product.id,
-      name: product.name,
-      quantity,
-      unitPriceCents: product.priceCents,
-    });
   }
 
-  // Verifica se o total calculado é um número seguro.
-  if (!Number.isSafeInteger(totalCents)) {
-    throw validationError("Total do pedido inválido");
+  // Remove a quebra de linha final comum em arquivos de segredo.
+  const value = content.replace(/\r?\n$/, "");
+
+  if (value.trim().length === 0) {
+    throw configError(
+      `O arquivo indicado em ${fileVariable} está vazio`
+    );
   }
 
-  // Retorna o pedido validado.
-  return {
-    items: validatedItems,
-    totalCents,
-    status: "confirmed",
-    fictional: true,
-  };
+  return value;
+}
+
+/**
+ * Valida o endereço do MongoDB, impedindo caracteres que
+ * alterariam a estrutura da URI de conexão.
+ */
+function readMongoHost(env) {
+  const host = readString(env, "MONGO_HOST") ?? DEFAULTS.mongoHost;
+
+  if (!/^[a-zA-Z0-9.-]+$/.test(host)) {
+    throw configError("Valor inválido para MONGO_HOST");
+  }
+
+  return host;
+}
+
+/**
+ * Valida o nome de um banco de dados do MongoDB.
+ */
+function readDatabaseName(env, name, fallback) {
+  const value = readString(env, name) ?? fallback;
+
+  if (!/^[a-zA-Z0-9_-]{1,63}$/.test(value)) {
+    throw configError(`Valor inválido para ${name}`);
+  }
+
+  return value;
+}
+
+/**
+ * Monta a configuração da aplicação.
+ *
+ * @param {Object} env Variáveis de ambiente (padrão: process.env).
+ * @returns {Object} Configuração validada.
+ */
+export function readConfig(env = process.env) {
+  const host = readString(env, "HOST") ?? DEFAULTS.host;
+  const port = readPort(env, "PORT", DEFAULTS.port);
+  const version = readString(env, "APP_VERSION") ?? DEFAULTS.version;
+
+  const mongoHost = readMongoHost(env);
+  const mongoPort = readPort(env, "MONGO_PORT", DEFAULTS.mongoPort);
+  const database = readDatabaseName(env, "MONGO_DATABASE", DEFAULTS.database);
+  const authSource = readDatabaseName(env, "MONGO_AUTH_SOURCE", database);
+
+  const username = readSecret(env, "MONGO_USERNAME");
+  const password = readSecret(env, "MONGO_PASSWORD");
+
+  if ((username === undefined) !== (password === undefined)) {
+    throw configError(
+      "MONGO_USERNAME e MONGO_PASSWORD devem ser informados juntos"
+    );
+  }
+
+  // Codifica as credenciais para aceitar caracteres especiais.
+  const credentials =
+    username !== undefined
+      ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
+      : "";
+
+  const query =
+    username !== undefined
+      ? `?authSource=${encodeURIComponent(authSource)}`
+      : "";
+
+  const mongoUri =
+    `mongodb://${credentials}${mongoHost}:${mongoPort}/${database}${query}`;
+
+  return Object.freeze({
+    host,
+    port,
+    version,
+    database,
+    mongoUri,
+  });
 }

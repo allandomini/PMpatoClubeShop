@@ -1,0 +1,67 @@
+# ==========================================================
+# Role backup - Backups automáticos do MongoDB
+#
+# - mongodump diário (systemd timer), compactado, no volume de
+#   dados em {{ backup_dir }}, com retenção local.
+# - Cópia externa no Azure Blob Storage pelo link SAS do Terraform
+#   (se KUBESHOP_BACKUP_SAS_URL estiver definido).
+# - kubeshop-restore restaura um dump local ou do bucket.
+# ==========================================================
+
+- name: Grava a configuração dos backups
+  ansible.builtin.copy:
+    dest: /etc/kubeshop-backup.env
+    content: |
+      # Gerenciado pelo Ansible (KubeShop)
+      MONGO_CONTAINER={{ mongo_container_name }}
+      MONGO_PORT={{ mongo_port }}
+      MONGO_DATABASE={{ mongo_database }}
+      MONGO_ROOT_USERNAME={{ mongo_root_username }}
+      BACKUP_DIR={{ backup_dir }}
+      BACKUP_RETENTION_DAYS={{ backup_retention_days }}
+      BACKUP_BUCKET_PREFIX={{ backup_bucket_prefix }}
+      # Entre aspas: o token SAS contém "&", que o shell trataria como comando em segundo plano.
+      BACKUP_SAS_URL='{{ backup_sas_url }}'
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Avisa quando não há cópia externa configurada
+  ansible.builtin.debug:
+    msg: >-
+      KUBESHOP_BACKUP_SAS_URL não definido: os backups ficarão apenas
+      no volume de dados da VM. Defina-o para enviar cópias ao contêiner do Blob Storage.
+  when: backup_sas_url | length == 0
+
+- name: Instala os scripts de backup e restauração
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/usr/local/sbin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - kubeshop-backup
+    - kubeshop-restore
+
+- name: Instala o serviço e o agendamento do backup
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kubeshop-backup.service
+    - kubeshop-backup.timer
+  notify: Recarrega o systemd
+
+- name: Aplica as unidades do systemd
+  ansible.builtin.meta: flush_handlers
+
+- name: Ativa o agendamento diário do backup
+  ansible.builtin.systemd_service:
+    name: kubeshop-backup.timer
+    state: started
+    enabled: true

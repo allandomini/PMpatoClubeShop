@@ -35,7 +35,7 @@ export default defineConfig({
     environment: "jsdom",
 
     // Arquivo responsável pela preparação dos testes
-    setupFiles: ["./src/test-stup.js"],
+    setupFiles: ["./src/test-setup.js"],
 
     // Arquivos de teste reconhecidos pelo Vitest
     include: ["src/**/*.test.{js,jsx}"],

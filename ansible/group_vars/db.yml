@@ -1,0 +1,18 @@
+# ==========================================================
+# KubeShop - VM do MongoDB
+# ==========================================================
+
+db_base_dir: /opt/kubeshop-db
+
+# Disco gerenciado criado pelo Terraform (LUN 0); o Azure mantém este link estável.
+mongo_device: /dev/disk/azure/scsi1/lun0
+mongo_mount_point: /srv/mongodb
+mongo_data_dir: "{{ mongo_mount_point }}/data"
+mongo_container_name: kubeshop-mongo
+
+# Backups lógicos (mongodump)
+backup_dir: "{{ mongo_mount_point }}/backups"
+backup_retention_days: 7
+# Horário em UTC (06:00 UTC = 03:00 em Brasília).
+backup_schedule: "*-*-* 06:00:00"
+backup_bucket_prefix: kubeshop-db/

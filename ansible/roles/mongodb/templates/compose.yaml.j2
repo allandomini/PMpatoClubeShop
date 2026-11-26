@@ -1,0 +1,38 @@
+# Gerenciado pelo Ansible (KubeShop) - não edite na VM.
+name: kubeshop-db
+
+services:
+  mongo:
+    image: {{ mongo_image }}
+    container_name: {{ mongo_container_name }}
+    restart: unless-stopped
+    # Rede do host: o mongod escuta só em 127.0.0.1 e no IP privado (bind_ip);
+    # o NSG da sub-rede aceita a porta apenas a partir da VM da aplicação.
+    network_mode: host
+    command:
+      - mongod
+      - --bind_ip
+      - "127.0.0.1,{{ private_ip }}"
+      - --port
+      - "{{ mongo_port }}"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: {{ mongo_root_username }}
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_INITDB_DATABASE: {{ mongo_database }}
+      MONGO_APP_USERNAME: {{ mongo_app_username }}
+      MONGO_APP_PASSWORD_FILE: /run/secrets/mongo_app_password
+    volumes:
+      - {{ mongo_data_dir }}:/data/db
+      - {{ backup_dir }}:/backups
+      - {{ db_base_dir }}/scripts/init.js:/docker-entrypoint-initdb.d/10-init.js:ro
+      - {{ db_base_dir }}/scripts/healthcheck.js:/usr/local/share/kubeshop/healthcheck.js:ro
+      - {{ db_base_dir }}/secrets/mongo_root_password:/run/secrets/mongo_root_password:ro
+      - {{ db_base_dir }}/secrets/mongo_app_password:/run/secrets/mongo_app_password:ro
+      - {{ db_base_dir }}/secrets/mongo_tools.yaml:/run/secrets/mongo_tools.yaml:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--norc", "--port", "{{ mongo_port }}", "/usr/local/share/kubeshop/healthcheck.js"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    stop_grace_period: 60s

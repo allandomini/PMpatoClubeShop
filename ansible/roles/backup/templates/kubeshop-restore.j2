@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ==========================================================
+# KubeShop - Restauração do MongoDB (gerenciado pelo Ansible)
+#
+# Uso:
+#   sudo kubeshop-restore --list                 lista dumps locais
+#   sudo kubeshop-restore --list-bucket          lista dumps no bucket
+#   sudo kubeshop-restore latest --yes           restaura o dump local mais recente
+#   sudo kubeshop-restore NOME --yes             restaura um dump local
+#   sudo kubeshop-restore --from-bucket NOME --yes
+#
+# ATENÇÃO: substitui o conteúdo atual do banco da aplicação.
+# Antes de restaurar, um backup de segurança é feito automaticamente.
+# Saída final (evidência): "RESTORE_OK nome=... documentos=..."
+# ==========================================================
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source /etc/kubeshop-backup.env
+
+log() { echo "[kubeshop-restore] $(date -u +%FT%TZ) $*"; }
+die() { echo "[kubeshop-restore] ERRO: $*" >&2; exit 1; }
+
+valid_name() { [[ "$1" =~ ^kubeshop-(pre-restore-)?[0-9]{8}T[0-9]{6}Z\.archive\.gz$ ]]; }
+
+list_local() {
+  find "${BACKUP_DIR}" -maxdepth 1 -name 'kubeshop-*.archive.gz' -printf '%f\t%s bytes\n' | sort
+}
+
+# O link SAS tem o formato https://conta.blob.core.windows.net/contêiner?token
+blob_split() {
+  [[ -n "${BACKUP_SAS_URL:-}" ]] || die "BACKUP_SAS_URL não configurado"
+  blob_base="${BACKUP_SAS_URL%%\?*}"
+  blob_sas="${BACKUP_SAS_URL#*\?}"
+}
+
+list_bucket() {
+  blob_split
+  # A listagem do Blob Storage é XML: <Name>prefixo/arquivo</Name>.
+  curl --fail --silent --show-error -H "x-ms-version: 2023-11-03" \
+    "${blob_base}?restype=container&comp=list&prefix=${BACKUP_BUCKET_PREFIX}&${blob_sas}" \
+    | grep -o '<Name>[^<]*</Name>' | sed -e 's#<Name>##' -e 's#</Name>##' \
+    | sed "s#^${BACKUP_BUCKET_PREFIX}##" | sort
+}
+
+source_mode="local"
+name=""
+confirmed=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --list) list_local; exit 0 ;;
+    --list-bucket) list_bucket; exit 0 ;;
+    --from-bucket) source_mode="bucket"; name="${2:-}"; shift ;;
+    --yes) confirmed=1 ;;
+    # Mais recente entre os backups normais (ignora os pre-restore).
+    latest) name="$(list_local | cut -f1 | grep -v '^kubeshop-pre-restore-' | tail -n 1 || true)" ;;
+    *) name="$1" ;;
+  esac
+  shift
+done
+
+[[ -n "${name}" ]] || die "informe o dump (NOME, latest ou --from-bucket NOME). Veja --list."
+valid_name "${name}" || die "nome de dump inválido: ${name}"
+[[ "${confirmed}" -eq 1 ]] || die "a restauração substitui os dados atuais; repita com --yes para confirmar"
+
+file="${BACKUP_DIR}/${name}"
+
+if [[ "${source_mode}" == "bucket" ]]; then
+  blob_split
+  log "baixando ${name} do Blob Storage"
+  curl --fail --silent --show-error --retry 3 -H "x-ms-version: 2023-11-03" \
+    -o "${file}.download" "${blob_base}/${BACKUP_BUCKET_PREFIX}${name}?${blob_sas}"
+  mv "${file}.download" "${file}"
+fi
+
+[[ -f "${file}" ]] || die "dump não encontrado: ${file}"
+gzip -t "${file}" || die "o arquivo está corrompido: ${name}"
+
+if [[ -f "${file}.sha256" ]]; then
+  (cd "${BACKUP_DIR}" && sha256sum --quiet -c "${name}.sha256") || die "checksum não confere: ${name}"
+fi
+
+log "backup de segurança do estado atual antes de restaurar (para desfazer, restaure o kubeshop-pre-restore-* mais recente)"
+/usr/local/sbin/kubeshop-backup --no-upload --pre-restore | tail -n 1
+
+log "restaurando ${name} no banco ${MONGO_DATABASE}"
+output="$(docker exec "${MONGO_CONTAINER}" mongorestore \
+  --port "${MONGO_PORT}" \
+  --username "${MONGO_ROOT_USERNAME}" \
+  --config /run/secrets/mongo_tools.yaml \
+  --authenticationDatabase admin \
+  --nsInclude "${MONGO_DATABASE}.*" \
+  --drop \
+  --gzip \
+  --archive="/backups/${name}" 2>&1)" || { echo "${output}" | tail -n 5 >&2; die "mongorestore falhou"; }
+
+restored="$(echo "${output}" | grep -oE '[0-9]+ document\(s\) restored successfully' | grep -oE '^[0-9]+' || echo 0)"
+failed="$(echo "${output}" | grep -oE '[0-9]+ document\(s\) failed to restore' | grep -oE '^[0-9]+' || echo 0)"
+
+[[ "${failed}" -eq 0 ]] || die "${failed} documento(s) falharam na restauração"
+
+echo "RESTORE_OK nome=${name} documentos=${restored}"

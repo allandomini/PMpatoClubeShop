@@ -1,0 +1,35 @@
+# ==========================================================
+# KubeShop - Exemplo de variáveis do Terraform
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars está no .gitignore. Não coloque senhas nem segredos
+# aqui: o login no Azure vem do "az login" ou das variáveis ARM_*.
+# ==========================================================
+
+# az account show --query id -o tsv
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# São Paulo. eastus2 tem VMs cerca de 38% mais baratas.
+location = "brazilsouth"
+
+# Conteúdo da chave pública (cat ~/.ssh/id_ed25519.pub)
+ssh_public_key = "ssh-ed25519 AAAA... equipe-kubeshop"
+
+# Seu IP público com /32 (curl -s https://ifconfig.me)
+admin_cidrs = ["203.0.113.10/32"]
+
+# Nome único em todo o Azure: 3 a 24 letras minúsculas e números.
+backup_storage_account = "kubeshopbkp0001"
+
+# Opcional: IPs extras com acesso à conta de backups (ex.: o seu, para baixar
+# dumps à mão). Por padrão só a sub-rede da VM do banco acessa.
+# backup_allowed_ips = ["203.0.113.10"]
+
+# Opcional: endereço DNS gratuito <label>.brazilsouth.cloudapp.azure.com
+# domain_name_label = "kubeshop-minhaequipe"
+
+# Dimensionamento
+app_vm_size        = "Standard_B2s"
+db_vm_size         = "Standard_B2s"
+mongo_data_disk_gb = 64

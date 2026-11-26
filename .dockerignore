@@ -1,0 +1,13 @@
+# Evita enviar arquivos desnecessários ou sensíveis ao Docker
+# quando a raiz do repositório é usada como contexto de build.
+# (Cada aplicação também possui seu próprio .dockerignore.)
+**/node_modules
+**/dist
+.git
+.env
+.env.*
+terraform/
+ansible/
+test-results/
+playwright-report/
+*.log

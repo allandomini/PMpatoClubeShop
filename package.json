@@ -1,0 +1,26 @@
+{
+  "name": "kubeshop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "KubeShop - loja fictícia (React + Nginx, Node.js/Express e MongoDB) com infraestrutura no Microsoft Azure.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "setup": "node roteiros/setup.mjs",
+    "smoke": "node roteiros/smoke.mjs",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "npm --prefix aplicativos/backend ci && npm --prefix aplicativos/backend test",
+    "test:frontend": "npm --prefix aplicativos/frontend ci && npm --prefix aplicativos/frontend test",
+    "test:browser": "playwright test",
+    "browser:install": "playwright install chromium",
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f --tail=100"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
+  }
+}

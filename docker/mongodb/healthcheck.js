@@ -34,8 +34,8 @@ try {
   // Verifica a autenticação do usuário
   const authenticationResult = appDb.auth(username, password);
 
-  // db.auth() retorna 1 para sucesso e 0 para falha
-  if (authenticationResult !== 1) {
+  // No mongosh, db.auth() retorna { ok: 1 } (o shell legado retornava 1).
+  if (authenticationResult !== 1 && authenticationResult?.ok !== 1) {
     print("Health check: falha na autenticação.");
     quit(1);
   }

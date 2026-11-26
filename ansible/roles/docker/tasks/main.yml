@@ -1,0 +1,36 @@
+# ==========================================================
+# Role docker - Docker Engine e Docker Compose
+#
+# Usa os pacotes do próprio Ubuntu 24.04 (docker.io e
+# docker-compose-v2), atualizados pelo unattended-upgrades.
+# ==========================================================
+
+- name: Instala o Docker Engine e o plugin Compose
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+
+- name: Configura o Docker (logs com limite de tamanho)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "5" },
+        "live-restore": true
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reinicia o Docker
+
+- name: Inicia o Docker junto com o sistema
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Aplica a configuração do Docker antes de subir os serviços
+  ansible.builtin.meta: flush_handlers
