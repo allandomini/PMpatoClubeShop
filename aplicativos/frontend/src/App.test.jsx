@@ -14,6 +14,7 @@ import {
   screen,
   fireEvent,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 import App, { money } from "./App.jsx";
@@ -158,8 +159,10 @@ describe("KubeShop - frontend", () => {
       }),
     );
 
-    expect(screen.getByText("1 × R$ 189,90")).toBeInTheDocument();
-    expect(screen.getByText("R$ 189,90")).toBeInTheDocument();
+    expect(screen.getByText("1 × R$ 189,90")).toBeInTheDocument();
+    // O mesmo valor aparece no card do produto; confere o total da sacola.
+    const bag = screen.getByRole("complementary", { name: "Sua sacola" });
+    expect(within(bag).getByText("R$ 189,90")).toBeInTheDocument();
 
     expect(
       screen.getByRole("button", {
@@ -216,8 +219,9 @@ describe("KubeShop - frontend", () => {
       await screen.findByText("Pedido #123456"),
     ).toBeInTheDocument();
 
+    // O histórico exibe cada item como "quantidade × nome".
     expect(
-      screen.getByText("Headphone Orbit"),
+      screen.getByText("1 × Headphone Orbit"),
     ).toBeInTheDocument();
 
     // A sacola deve estar vazia após a confirmação.
@@ -291,7 +295,7 @@ describe("KubeShop - frontend", () => {
 
     // O produto continua na sacola.
     expect(
-      screen.getByText("1 × R$ 189,90"),
+      screen.getByText("1 × R$ 189,90"),
     ).toBeInTheDocument();
 
     // O usuário pode tentar novamente.
@@ -314,7 +318,7 @@ describe("KubeShop - frontend", () => {
     );
 
     expect(
-      screen.getByText("1 × R$ 189,90"),
+      screen.getByText("1 × R$ 189,90"),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -324,7 +328,7 @@ describe("KubeShop - frontend", () => {
     );
 
     expect(
-      screen.queryByText("1 × R$ 189,90"),
+      screen.queryByText("1 × R$ 189,90"),
     ).not.toBeInTheDocument();
 
     expect(
