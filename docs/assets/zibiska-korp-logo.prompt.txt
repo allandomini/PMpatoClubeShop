@@ -1,0 +1,143 @@
+
+MODO DE GERAÇÃO
+Ferramenta: ferramenta integrada de geração de imagens (ImageGen).
+Tipo de geração: criação de logomarca corporativa original.
+Fundo: transparente, com canal alpha real.
+Formato final: PNG.
+Arquivo final: docs/assets/zibiska-korp-logo.png
+
+============================================================
+PROMPT DE GERAÇÃO
+============================================================
+
+Use case: logo-brand.
+
+Asset type: finished corporate logo to be embedded in a
+formal PDF project document and corporate presentation.
+
+Create an original, professional corporate logo for
+ZIBISKA KORP, a retail holding expanding its business
+into digital commerce through its own marketplace,
+KubeShop.
+
+BRAND IDENTITY:
+
+The visual identity must communicate:
+- Trust and corporate credibility.
+- Innovation and digital transformation.
+- Connection between traditional retail and digital commerce.
+- Growth, progress and forward movement.
+- Professionalism, stability and long-term vision.
+
+LOGO COMPOSITION:
+
+Exact text, and the only text in the image:
+
+"ZIBISKA KORP"
+
+Create a confident, timeless and minimalist corporate
+wordmark with a compact abstract geometric Z symbol
+positioned to the left of the company name.
+
+The symbol should communicate connection, integration
+and forward movement through interlocking blue and
+orange geometric shapes.
+
+The symbol must be original, recognizable and visually
+balanced with the wordmark.
+
+Do not use shopping-cart icons, retail clipart,
+generic technology symbols or pre-existing brand marks.
+
+TYPOGRAPHY:
+
+Use an exceptionally legible modern sans-serif typeface.
+
+The wordmark must use uppercase letters:
+"ZIBISKA KORP"
+
+Use precise kerning, consistent letter spacing and
+balanced proportions.
+
+The typography should communicate confidence,
+professionalism and corporate maturity.
+
+COLOR PALETTE:
+
+Primary color:
+Deep blue #174A8B
+
+Secondary color:
+Vivid orange #F47B20
+
+Use the blue as the dominant color for the wordmark
+and combine blue and orange in the geometric Z symbol.
+
+Maintain strong contrast and visual harmony.
+
+VISUAL STYLE:
+
+- Flat vector-like graphic.
+- Sharp, clean and precise edges.
+- Solid color fills.
+- Minimalist geometric construction.
+- Clean corporate appearance.
+- Balanced negative space.
+- Consistent visual proportions.
+- High-resolution output.
+
+LAYOUT:
+
+Horizontal logo lockup.
+
+Place the abstract Z symbol on the left and the
+"ZIBISKA KORP" wordmark on the right.
+
+Use an approximate 3:1 aspect ratio.
+
+The symbol and wordmark should occupy most of the
+canvas while maintaining modest and even padding.
+
+TRANSPARENCY AND EXPORT REQUIREMENTS:
+
+Use a completely transparent background with actual
+alpha transparency.
+
+Do not simulate transparency using a white or
+checkerboard background.
+
+The logo must be suitable for insertion into formal
+PDF documents with white backgrounds.
+
+Preserve clean edges and avoid unwanted halos around
+the logo.
+
+Generate a high-resolution PNG image.
+
+STRICT RESTRICTIONS:
+
+- No gradients.
+- No textures.
+- No shadows.
+- No mockups.
+- No frames or borders.
+- No background scenes.
+- No decorative patterns.
+- No tagline.
+- No additional text.
+- No slogans.
+- No watermark.
+- No shopping-cart icon.
+- No unrelated symbols.
+- No misspelled or distorted lettering.
+
+The only readable text in the final image must be:
+
+"ZIBISKA KORP"
+
+FINAL RESULT:
+
+A polished, minimalist, timeless and recognizable
+corporate logo for ZIBISKA KORP, suitable for official
+project documentation, architecture diagrams,
+corporate presentations and the KubeShop project.

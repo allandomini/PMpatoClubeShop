@@ -72,7 +72,7 @@ Os scripts `kubeshop-backup` e `kubeshop-restore` foram executados num container
 | `frontend/src/App.jxs`, `Productart.jsx` | nomes errados | build e testes falhavam |
 | `frontend/nginx.conf` | 8 erros de digitação (`acess_logs`, `;` faltando, `%uri`, `Content-Segurity-Policy`, ...) | Nginx não iniciava; a CSP nunca era aplicada |
 | `frontend/src/App.test.jsx` | espaços não separáveis e textos esperados diferentes da tela | 4 testes falhavam |
-| `docker/mongodb/healthcheck.js` | vazio | sem verificação de saúde do banco |
+| `docker/mongodb/healthcheck.js` | vazio na primeira versão; na versão da `main`, comparava `db.auth()` com `1`, mas o `mongosh` devolve `{ ok: 1 }` | sem verificação de saúde; depois, o MongoDB ficava sempre `unhealthy` e a stack não subia |
 | ambos os apps | sem `package-lock.json` e `.dockerignore` | `npm ci` falhava no build |
 
 ---

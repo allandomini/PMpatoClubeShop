@@ -32,7 +32,7 @@ services:
       - mongo_app_password
     volumes:
       - mongo-data:/data/db
-      - ./docker/mongodb/init-app-user.js:/docker-entrypoint-initdb.d/10-init-app-user.js:ro
+      - ./docker/mongodb/init.js:/docker-entrypoint-initdb.d/10-init.js:ro
       - ./docker/mongodb/healthcheck.js:/usr/local/share/kubeshop/healthcheck.js:ro
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--norc", "/usr/local/share/kubeshop/healthcheck.js"]

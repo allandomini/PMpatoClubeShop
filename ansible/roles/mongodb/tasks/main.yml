@@ -102,7 +102,7 @@
     group: root
     mode: "0644"
   loop:
-    - init-app-user.js
+    - init.js
     - healthcheck.js
 
 - name: Grava os segredos do MongoDB

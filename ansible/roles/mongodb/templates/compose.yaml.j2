@@ -23,7 +23,7 @@ services:
     volumes:
       - {{ mongo_data_dir }}:/data/db
       - {{ backup_dir }}:/backups
-      - {{ db_base_dir }}/scripts/init-app-user.js:/docker-entrypoint-initdb.d/10-init-app-user.js:ro
+      - {{ db_base_dir }}/scripts/init.js:/docker-entrypoint-initdb.d/10-init.js:ro
       - {{ db_base_dir }}/scripts/healthcheck.js:/usr/local/share/kubeshop/healthcheck.js:ro
       - {{ db_base_dir }}/secrets/mongo_root_password:/run/secrets/mongo_root_password:ro
       - {{ db_base_dir }}/secrets/mongo_app_password:/run/secrets/mongo_app_password:ro
