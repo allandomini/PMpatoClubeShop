@@ -15,7 +15,3 @@ app_public_port: 80
 app_use_registry_images: false
 app_api_image: "kubeshop-api:{{ kubeshop_version }}"
 app_web_image: "kubeshop-web:{{ kubeshop_version }}"
-
-firewall_allow:
-  - { port: 80, comment: "Loja HTTP" }
-  - { port: 443, comment: "Loja HTTPS" }

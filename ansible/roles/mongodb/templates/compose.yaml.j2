@@ -6,7 +6,8 @@ services:
     image: {{ mongo_image }}
     container_name: {{ mongo_container_name }}
     restart: unless-stopped
-    # Rede do host: o firewall local (iptables INPUT) controla o acesso.
+    # Rede do host: o mongod escuta só em 127.0.0.1 e no IP privado (bind_ip);
+    # o NSG da sub-rede aceita a porta apenas a partir da VM da aplicação.
     network_mode: host
     command:
       - mongod

@@ -2,16 +2,3 @@
   ansible.builtin.systemd_service:
     name: ssh
     state: reloaded
-
-# Recarregar o iptables apaga as cadeias criadas pelo Docker;
-# por isso o Docker é reiniciado em seguida (se já estiver instalado).
-- name: Recarrega o firewall
-  ansible.builtin.shell: |
-    set -e
-    netfilter-persistent reload
-    if systemctl is-active --quiet docker; then
-      systemctl restart docker
-    fi
-  args:
-    executable: /bin/bash
-  changed_when: true

@@ -1,22 +1,27 @@
 # ==========================================================
-# KubeShop - Infraestrutura na Oracle Cloud
+# KubeShop - Infraestrutura no Microsoft Azure
 #
 #   Internet
 #      │  80/443 (todos)   22 (somente admin_cidrs)
 #      ▼
-#   ┌──────────── VCN 10.20.0.0/16 ─────────────────────────┐
-#   │  Sub-rede pública 10.20.1.0/24                         │
+#   ┌──────────── VNet 10.20.0.0/16 ────────────────────────┐
+#   │  Sub-rede da app 10.20.1.0/24                          │
 #   │   VM app (Nginx + React + API)  IP privado .10         │
-#   │      │ 27017 e 22 (somente a partir da NSG app)        │
+#   │      │ 27017 e 22 (somente a partir do grupo "app")    │
 #   │      ▼                                                 │
 #   │  Sub-rede privada 10.20.2.0/24 (sem IP público)        │
-#   │   VM db (MongoDB) IP privado .10 + volume de dados     │
-#   │      │ saída por NAT (atualizações) e Service Gateway  │
-#   │      ▼ (backups no Object Storage)                     │
-#   └────────────────────────────────────────────────────────┘
+#   │   VM db (MongoDB) IP privado .10 + disco de dados      │
+#   │      │ saída pelo NAT Gateway (atualizações, imagens)  │
+#   └──────┼─────────────────────────────────────────────────┘
+#          ▼
+#   Storage Account: contêiner "backups" (cópia externa dos dumps)
 #
 # Atende: REQ-01 (2 VMs), REQ-02/03 (banco isolado na rede privada),
-# REQ-04 (SSH restrito), REQ-05 (volume de dados separado da VM).
+# REQ-04 (SSH restrito), REQ-05 (disco de dados separado da VM).
+#
+# As regras de segurança são recursos separados (e não blocos dentro
+# do NSG) para o Terraform não apagar as regras temporárias de SSH que
+# o pipeline cria para o IP do runner.
 # ==========================================================
 
 locals {
@@ -28,385 +33,371 @@ locals {
     gerenciado_por = "terraform"
   }
 
-  is_flex = endswith(var.instance_shape, ".Flex")
-
-  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[var.availability_domain_index].name
-
-  image_id = coalesce(var.image_ocid, try(data.oci_core_images.ubuntu.images[0].id, null))
-
   app_private_ip = cidrhost(var.public_subnet_cidr, 10)
   db_private_ip  = cidrhost(var.private_subnet_cidr, 10)
 
-  # Caminho fixo do volume dentro da VM (anexo paravirtualizado).
-  mongo_device_path = "/dev/oracleoci/oraclevdb"
+  # Caminho fixo do disco de dados dentro da VM (LUN 0): o Azure cria
+  # este link estável em /dev/disk/azure/scsi1.
+  mongo_device_path = "/dev/disk/azure/scsi1/lun0"
 }
 
-# ----------------------------------------------------------
-# Consultas
-# ----------------------------------------------------------
-
-data "oci_identity_availability_domains" "ads" {
-  compartment_id = var.tenancy_ocid
-}
-
-data "oci_core_images" "ubuntu" {
-  compartment_id           = var.compartment_ocid
-  operating_system         = "Canonical Ubuntu"
-  operating_system_version = "24.04"
-  shape                    = var.instance_shape
-  sort_by                  = "TIMECREATED"
-  sort_order               = "DESC"
-
-  # Exclui as variantes "Minimal".
-  filter {
-    name   = "display_name"
-    values = ["^Canonical-Ubuntu-24\\.04-(aarch64-)?\\d{4}\\..*$"]
-    regex  = true
-  }
-}
-
-data "oci_core_services" "all" {
-  filter {
-    name   = "name"
-    values = ["All .* Services In Oracle Services Network"]
-    regex  = true
-  }
-}
-
-data "oci_objectstorage_namespace" "this" {
-  compartment_id = var.tenancy_ocid
+resource "azurerm_resource_group" "main" {
+  name     = "${local.name}-rg"
+  location = var.location
+  tags     = local.tags
 }
 
 # ----------------------------------------------------------
 # Rede
 # ----------------------------------------------------------
 
-resource "oci_core_vcn" "main" {
-  compartment_id = var.compartment_ocid
-  display_name   = "${local.name}-vcn"
-  cidr_blocks    = [var.vcn_cidr]
-  dns_label      = "kubeshop"
-  freeform_tags  = local.tags
+resource "azurerm_virtual_network" "main" {
+  name                = "${local.name}-vnet"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  address_space       = [var.vnet_cidr]
+  tags                = local.tags
 }
 
-resource "oci_core_internet_gateway" "main" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-igw"
-  enabled        = true
-  freeform_tags  = local.tags
+resource "azurerm_subnet" "public" {
+  name                 = "app"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [var.public_subnet_cidr]
 }
 
-# Saída para a internet da sub-rede privada (pacotes e imagens),
-# sem permitir conexões de entrada. Sem custo no OCI.
-resource "oci_core_nat_gateway" "main" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-nat"
-  freeform_tags  = local.tags
-}
+resource "azurerm_subnet" "private" {
+  name                 = "db"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [var.private_subnet_cidr]
 
-# Acesso privado ao Object Storage (backups) sem passar pela internet.
-resource "oci_core_service_gateway" "main" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-sgw"
-  freeform_tags  = local.tags
+  # Sem saída implícita para a internet: a saída é só pelo NAT Gateway.
+  default_outbound_access_enabled = false
 
-  services {
-    service_id = data.oci_core_services.all.services[0].id
+  # Caminho direto e privado até o Blob Storage (backups). O firewall da
+  # conta de backups só vale para esta sub-rede por este endpoint: regras
+  # de IP não se aplicam a pedidos da mesma região do Azure.
+  service_endpoint {
+    service = "Microsoft.Storage"
   }
 }
 
-resource "oci_core_route_table" "public" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-rt-publica"
-  freeform_tags  = local.tags
-
-  route_rules {
-    destination       = "0.0.0.0/0"
-    destination_type  = "CIDR_BLOCK"
-    network_entity_id = oci_core_internet_gateway.main.id
-  }
+# Saída para a internet da sub-rede privada (pacotes e imagens), sem
+# permitir conexões de entrada.
+resource "azurerm_public_ip" "nat" {
+  name                = "${local.name}-nat-ip"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = local.tags
 }
 
-resource "oci_core_route_table" "private" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-rt-privada"
-  freeform_tags  = local.tags
-
-  route_rules {
-    destination       = "0.0.0.0/0"
-    destination_type  = "CIDR_BLOCK"
-    network_entity_id = oci_core_nat_gateway.main.id
-  }
-
-  route_rules {
-    destination       = data.oci_core_services.all.services[0].cidr_block
-    destination_type  = "SERVICE_CIDR_BLOCK"
-    network_entity_id = oci_core_service_gateway.main.id
-  }
+resource "azurerm_nat_gateway" "main" {
+  name                = "${local.name}-nat"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  sku_name            = "Standard"
+  tags                = local.tags
 }
 
-# Substitui a security list padrão da VCN (que libera SSH para
-# 0.0.0.0/0). As regras de entrada ficam nas NSGs abaixo.
-resource "oci_core_security_list" "baseline" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-sl-base"
-  freeform_tags  = local.tags
-
-  egress_security_rules {
-    destination = "0.0.0.0/0"
-    protocol    = "all"
-    stateless   = false
-  }
-
-  # Path MTU discovery.
-  ingress_security_rules {
-    source   = "0.0.0.0/0"
-    protocol = "1" # ICMP
-    icmp_options {
-      type = 3
-      code = 4
-    }
-  }
-
-  # Mensagens ICMP internas (diagnóstico com ping dentro da VCN).
-  ingress_security_rules {
-    source   = var.vcn_cidr
-    protocol = "1"
-    icmp_options {
-      type = 3
-    }
-  }
+resource "azurerm_nat_gateway_public_ip_association" "main" {
+  nat_gateway_id       = azurerm_nat_gateway.main.id
+  public_ip_address_id = azurerm_public_ip.nat.id
 }
 
-resource "oci_core_subnet" "public" {
-  compartment_id    = var.compartment_ocid
-  vcn_id            = oci_core_vcn.main.id
-  display_name      = "${local.name}-subnet-app"
-  cidr_block        = var.public_subnet_cidr
-  dns_label         = "app"
-  route_table_id    = oci_core_route_table.public.id
-  security_list_ids = [oci_core_security_list.baseline.id]
-  freeform_tags     = local.tags
-}
+resource "azurerm_subnet_nat_gateway_association" "private" {
+  subnet_id      = azurerm_subnet.private.id
+  nat_gateway_id = azurerm_nat_gateway.main.id
 
-resource "oci_core_subnet" "private" {
-  compartment_id             = var.compartment_ocid
-  vcn_id                     = oci_core_vcn.main.id
-  display_name               = "${local.name}-subnet-db"
-  cidr_block                 = var.private_subnet_cidr
-  dns_label                  = "db"
-  route_table_id             = oci_core_route_table.private.id
-  security_list_ids          = [oci_core_security_list.baseline.id]
-  prohibit_public_ip_on_vnic = true
-  freeform_tags              = local.tags
+  depends_on = [azurerm_nat_gateway_public_ip_association.main]
 }
 
 # ----------------------------------------------------------
 # Regras de acesso (Network Security Groups)
 # ----------------------------------------------------------
 
-resource "oci_core_network_security_group" "app" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-nsg-app"
-  freeform_tags  = local.tags
+# Grupos de segurança de aplicação: permitem escrever as regras do banco
+# como "somente a partir da VM da aplicação", sem depender de IPs.
+resource "azurerm_application_security_group" "app" {
+  name                = "${local.name}-asg-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.tags
 }
 
-resource "oci_core_network_security_group" "db" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.main.id
-  display_name   = "${local.name}-nsg-db"
-  freeform_tags  = local.tags
+resource "azurerm_application_security_group" "db" {
+  name                = "${local.name}-asg-db"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.tags
+}
+
+resource "azurerm_network_security_group" "app" {
+  name                = "${local.name}-nsg-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.tags
+}
+
+resource "azurerm_network_security_group" "db" {
+  name                = "${local.name}-nsg-db"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.tags
+}
+
+resource "azurerm_subnet_network_security_group_association" "public" {
+  subnet_id                 = azurerm_subnet.public.id
+  network_security_group_id = azurerm_network_security_group.app.id
+}
+
+resource "azurerm_subnet_network_security_group_association" "private" {
+  subnet_id                 = azurerm_subnet.private.id
+  network_security_group_id = azurerm_network_security_group.db.id
 }
 
 # Loja: HTTP e HTTPS abertos ao público.
-resource "oci_core_network_security_group_security_rule" "app_web" {
-  for_each = toset(["80", "443"])
-
-  network_security_group_id = oci_core_network_security_group.app.id
-  direction                 = "INGRESS"
-  protocol                  = "6" # TCP
-  source                    = "0.0.0.0/0"
-  source_type               = "CIDR_BLOCK"
-  description               = "Loja KubeShop (porta ${each.key})"
-
-  tcp_options {
-    destination_port_range {
-      min = tonumber(each.key)
-      max = tonumber(each.key)
-    }
-  }
+# Intencional: é a vitrine pública da loja. Nenhuma outra porta é aberta ao mundo.
+#trivy:ignore:AVD-AZU-0047
+resource "azurerm_network_security_rule" "app_web" {
+  name                        = "permitir-http-https"
+  priority                    = 100
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_ranges     = ["80", "443"]
+  source_address_prefix       = "Internet"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.app.name
+  description                 = "Loja KubeShop"
 }
 
 # SSH administrativo somente a partir das redes autorizadas.
-resource "oci_core_network_security_group_security_rule" "app_ssh" {
-  for_each = toset(var.admin_cidrs)
-
-  network_security_group_id = oci_core_network_security_group.app.id
-  direction                 = "INGRESS"
-  protocol                  = "6"
-  source                    = each.key
-  source_type               = "CIDR_BLOCK"
-  description               = "SSH administrativo"
-
-  tcp_options {
-    destination_port_range {
-      min = 22
-      max = 22
-    }
-  }
+# Prioridades 300 a 399 ficam reservadas às regras temporárias do pipeline.
+resource "azurerm_network_security_rule" "app_ssh" {
+  name                        = "permitir-ssh-admin"
+  priority                    = 200
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "22"
+  source_address_prefixes     = var.admin_cidrs
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.app.name
+  description                 = "SSH administrativo"
 }
 
-resource "oci_core_network_security_group_security_rule" "app_egress" {
-  network_security_group_id = oci_core_network_security_group.app.id
-  direction                 = "EGRESS"
-  protocol                  = "all"
-  destination               = "0.0.0.0/0"
-  destination_type          = "CIDR_BLOCK"
+# Nega o restante do tráfego interno da VNet (a regra padrão do Azure
+# liberaria qualquer VM da rede).
+resource "azurerm_network_security_rule" "app_deny_vnet" {
+  name                        = "negar-vnet"
+  priority                    = 4000
+  direction                   = "Inbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "VirtualNetwork"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.app.name
+  description                 = "Nega o tráfego interno não previsto"
 }
 
-# MongoDB: aceita conexões SOMENTE da NSG da aplicação (REQ-03).
-resource "oci_core_network_security_group_security_rule" "db_mongo" {
-  network_security_group_id = oci_core_network_security_group.db.id
-  direction                 = "INGRESS"
-  protocol                  = "6"
-  source                    = oci_core_network_security_group.app.id
-  source_type               = "NETWORK_SECURITY_GROUP"
-  description               = "MongoDB a partir da VM da aplicação"
-
-  tcp_options {
-    destination_port_range {
-      min = 27017
-      max = 27017
-    }
-  }
+# MongoDB: aceita conexões SOMENTE do grupo da aplicação (REQ-03).
+resource "azurerm_network_security_rule" "db_mongo" {
+  name                                       = "permitir-mongodb-da-app"
+  priority                                   = 100
+  direction                                  = "Inbound"
+  access                                     = "Allow"
+  protocol                                   = "Tcp"
+  source_port_range                          = "*"
+  destination_port_range                     = "27017"
+  source_application_security_group_ids      = [azurerm_application_security_group.app.id]
+  destination_application_security_group_ids = [azurerm_application_security_group.db.id]
+  resource_group_name                        = azurerm_resource_group.main.name
+  network_security_group_name                = azurerm_network_security_group.db.name
+  description                                = "MongoDB a partir da VM da aplicação"
 }
 
-# SSH do banco somente passando pela VM da aplicação (ProxyJump).
-resource "oci_core_network_security_group_security_rule" "db_ssh" {
-  network_security_group_id = oci_core_network_security_group.db.id
-  direction                 = "INGRESS"
-  protocol                  = "6"
-  source                    = oci_core_network_security_group.app.id
-  source_type               = "NETWORK_SECURITY_GROUP"
-  description               = "SSH administrativo via VM da aplicação"
-
-  tcp_options {
-    destination_port_range {
-      min = 22
-      max = 22
-    }
-  }
+# SSH do banco somente passando pela VM da aplicação (ProxyCommand).
+resource "azurerm_network_security_rule" "db_ssh" {
+  name                                       = "permitir-ssh-via-app"
+  priority                                   = 110
+  direction                                  = "Inbound"
+  access                                     = "Allow"
+  protocol                                   = "Tcp"
+  source_port_range                          = "*"
+  destination_port_range                     = "22"
+  source_application_security_group_ids      = [azurerm_application_security_group.app.id]
+  destination_application_security_group_ids = [azurerm_application_security_group.db.id]
+  resource_group_name                        = azurerm_resource_group.main.name
+  network_security_group_name                = azurerm_network_security_group.db.name
+  description                                = "SSH administrativo via VM da aplicação"
 }
 
-resource "oci_core_network_security_group_security_rule" "db_egress" {
-  network_security_group_id = oci_core_network_security_group.db.id
-  direction                 = "EGRESS"
-  protocol                  = "all"
-  destination               = "0.0.0.0/0"
-  destination_type          = "CIDR_BLOCK"
+resource "azurerm_network_security_rule" "db_deny_vnet" {
+  name                        = "negar-vnet"
+  priority                    = 4000
+  direction                   = "Inbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "VirtualNetwork"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.db.name
+  description                 = "Nega o tráfego interno não previsto"
 }
 
 # ----------------------------------------------------------
 # Máquinas virtuais
 # ----------------------------------------------------------
 
-resource "oci_core_instance" "app" {
-  compartment_id      = var.compartment_ocid
-  availability_domain = local.availability_domain
-  display_name        = "${local.name}-app"
-  shape               = var.instance_shape
-  freeform_tags       = merge(local.tags, { funcao = "aplicacao" })
+resource "azurerm_public_ip" "app" {
+  name                = "${local.name}-app-ip"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  domain_name_label   = var.domain_name_label
+  tags                = local.tags
+}
 
-  dynamic "shape_config" {
-    for_each = local.is_flex ? [1] : []
-    content {
-      ocpus         = var.app_ocpus
-      memory_in_gbs = var.app_memory_gb
-    }
-  }
+# O NSG está associado à sub-rede (e não à interface): a regra vale igual.
+# O IP público da VM da aplicação é intencional: é a entrada da loja.
+#trivy:ignore:AVD-AZU-0068
+#trivy:ignore:AVD-AZU-0076
+resource "azurerm_network_interface" "app" {
+  name                = "${local.name}-app-nic"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.tags
 
-  source_details {
-    source_type             = "image"
-    source_id               = local.image_id
-    boot_volume_size_in_gbs = var.boot_volume_gb
-  }
-
-  create_vnic_details {
-    subnet_id        = oci_core_subnet.public.id
-    private_ip       = local.app_private_ip
-    assign_public_ip = true
-    hostname_label   = "app"
-    nsg_ids          = [oci_core_network_security_group.app.id]
-  }
-
-  metadata = {
-    ssh_authorized_keys = var.ssh_public_key
-  }
-
-  lifecycle {
-    # Novas imagens do Ubuntu não devem recriar a VM sozinhas.
-    ignore_changes = [source_details[0].source_id]
+  ip_configuration {
+    name                          = "interna"
+    subnet_id                     = azurerm_subnet.public.id
+    private_ip_address_allocation = "Static"
+    private_ip_address            = local.app_private_ip
+    public_ip_address_id          = azurerm_public_ip.app.id
   }
 }
 
-resource "oci_core_instance" "db" {
-  compartment_id      = var.compartment_ocid
-  availability_domain = local.availability_domain
-  display_name        = "${local.name}-db"
-  shape               = var.instance_shape
-  freeform_tags       = merge(local.tags, { funcao = "banco" })
+# O NSG está associado à sub-rede (e não à interface): a regra vale igual.
+#trivy:ignore:AVD-AZU-0068
+resource "azurerm_network_interface" "db" {
+  name                = "${local.name}-db-nic"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.tags
 
-  dynamic "shape_config" {
-    for_each = local.is_flex ? [1] : []
-    content {
-      ocpus         = var.db_ocpus
-      memory_in_gbs = var.db_memory_gb
-    }
+  ip_configuration {
+    name                          = "interna"
+    subnet_id                     = azurerm_subnet.private.id
+    private_ip_address_allocation = "Static"
+    private_ip_address            = local.db_private_ip
+  }
+}
+
+resource "azurerm_network_interface_application_security_group_association" "app" {
+  network_interface_id          = azurerm_network_interface.app.id
+  application_security_group_id = azurerm_application_security_group.app.id
+}
+
+resource "azurerm_network_interface_application_security_group_association" "db" {
+  network_interface_id          = azurerm_network_interface.db.id
+  application_security_group_id = azurerm_application_security_group.db.id
+}
+
+resource "azurerm_linux_virtual_machine" "app" {
+  name                = "${local.name}-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  size                = var.app_vm_size
+  admin_username      = var.admin_username
+  tags                = merge(local.tags, { funcao = "aplicacao" })
+
+  network_interface_ids           = [azurerm_network_interface.app.id]
+  disable_password_authentication = true
+
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = var.ssh_public_key
   }
 
-  source_details {
-    source_type             = "image"
-    source_id               = local.image_id
-    boot_volume_size_in_gbs = var.boot_volume_gb
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "StandardSSD_LRS"
+    disk_size_gb         = var.os_disk_gb
   }
 
-  create_vnic_details {
-    subnet_id        = oci_core_subnet.private.id
-    private_ip       = local.db_private_ip
-    assign_public_ip = false
-    hostname_label   = "db"
-    nsg_ids          = [oci_core_network_security_group.db.id]
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server"
+    version   = "latest"
   }
 
-  metadata = {
-    ssh_authorized_keys = var.ssh_public_key
+  # Diagnóstico de inicialização (console serial) em armazenamento gerenciado.
+  boot_diagnostics {}
+}
+
+resource "azurerm_linux_virtual_machine" "db" {
+  name                = "${local.name}-db"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  size                = var.db_vm_size
+  admin_username      = var.admin_username
+  tags                = merge(local.tags, { funcao = "banco" })
+
+  network_interface_ids           = [azurerm_network_interface.db.id]
+  disable_password_authentication = true
+
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = var.ssh_public_key
   }
 
-  lifecycle {
-    ignore_changes = [source_details[0].source_id]
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "StandardSSD_LRS"
+    disk_size_gb         = var.os_disk_gb
   }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server"
+    version   = "latest"
+  }
+
+  boot_diagnostics {}
+
+  # A saída para a internet (apt, imagens do Docker) depende do NAT.
+  depends_on = [azurerm_subnet_nat_gateway_association.private]
 }
 
 # ----------------------------------------------------------
 # Armazenamento persistente do MongoDB
 # ----------------------------------------------------------
 
-# Volume separado da VM: os dados sobrevivem à troca ou recriação
-# da VM do banco (alteração de infraestrutura que preserva dados).
-resource "oci_core_volume" "mongo_data" {
-  compartment_id      = var.compartment_ocid
-  availability_domain = local.availability_domain
-  display_name        = "${local.name}-mongo-data"
-  size_in_gbs         = var.mongo_data_volume_gb
-  vpus_per_gb         = 10 # desempenho "Balanced"
-  freeform_tags       = merge(local.tags, { funcao = "dados-mongodb" })
+# Disco separado da VM: os dados sobrevivem à troca ou recriação da VM
+# do banco (alteração de infraestrutura que preserva dados).
+resource "azurerm_managed_disk" "mongo_data" {
+  name                 = "${local.name}-mongo-data"
+  location             = azurerm_resource_group.main.location
+  resource_group_name  = azurerm_resource_group.main.name
+  storage_account_type = "StandardSSD_LRS"
+  create_option        = "Empty"
+  disk_size_gb         = var.mongo_data_disk_gb
+  tags                 = merge(local.tags, { funcao = "dados-mongodb" })
 
   lifecycle {
     # Impede a remoção acidental dos dados. A desativação completa
@@ -415,49 +406,84 @@ resource "oci_core_volume" "mongo_data" {
   }
 }
 
-resource "oci_core_volume_attachment" "mongo_data" {
-  attachment_type = "paravirtualized"
-  instance_id     = oci_core_instance.db.id
-  volume_id       = oci_core_volume.mongo_data.id
-  device          = local.mongo_device_path
-  display_name    = "${local.name}-mongo-data-attachment"
+resource "azurerm_virtual_machine_data_disk_attachment" "mongo_data" {
+  managed_disk_id    = azurerm_managed_disk.mongo_data.id
+  virtual_machine_id = azurerm_linux_virtual_machine.db.id
+  lun                = 0
+  caching            = "ReadOnly"
 }
 
-data "oci_core_volume_backup_policies" "oracle" {
-  filter {
-    name   = "display_name"
-    values = ["bronze"]
+# ----------------------------------------------------------
+# Backups lógicos (mongodump) no Blob Storage
+# ----------------------------------------------------------
+
+# Achados aceitos de propósito, por custo e escopo: sem logs de acesso
+# (0057), sem replicação geográfica (0058), sem chave própria (0060) e sem
+# criptografia dupla (0061). Os dados já são criptografados pelo Azure e os
+# dumps contêm só pedidos fictícios. Veja README → Limitações.
+#trivy:ignore:AVD-AZU-0057
+#trivy:ignore:AVD-AZU-0058
+#trivy:ignore:AVD-AZU-0060
+#trivy:ignore:AVD-AZU-0061
+resource "azurerm_storage_account" "backups" {
+  name                     = var.backup_storage_account
+  location                 = azurerm_resource_group.main.location
+  resource_group_name      = azurerm_resource_group.main.name
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  account_kind             = "StorageV2"
+  min_tls_version          = "TLS1_2"
+  tags                     = local.tags
+
+  allow_nested_items_to_be_public = false
+
+  # Só a sub-rede do banco (pelo service endpoint Microsoft.Storage) e os
+  # IPs listados em backup_allowed_ips acessam a conta. Um token SAS vazado
+  # não serve a quem está fora dessa lista.
+  network_rules {
+    default_action             = "Deny"
+    virtual_network_subnet_ids = [azurerm_subnet.private.id]
+    ip_rules                   = var.backup_allowed_ips
+    bypass                     = ["AzureServices"]
+  }
+
+  blob_properties {
+    # Recupera dumps apagados ou sobrescritos por engano.
+    delete_retention_policy {
+      days = var.backup_retention_days
+    }
+  }
+
+  lifecycle {
+    # Os dumps são a cópia externa dos dados: não podem sumir por engano.
+    prevent_destroy = true
   }
 }
 
-resource "oci_core_volume_backup_policy_assignment" "mongo_data" {
-  count = var.enable_volume_backup_policy ? 1 : 0
-
-  asset_id  = oci_core_volume.mongo_data.id
-  policy_id = data.oci_core_volume_backup_policies.oracle.volume_backup_policies[0].id
+resource "azurerm_storage_container" "backups" {
+  name                  = var.backup_container_name
+  storage_account_id    = azurerm_storage_account.backups.id
+  container_access_type = "private"
 }
 
-# ----------------------------------------------------------
-# Backups lógicos (mongodump) no Object Storage
-# ----------------------------------------------------------
+# Link SAS (assinatura de acesso compartilhado) usado pela VM do banco
+# para enviar e baixar dumps. Evita configurar identidades dentro da VM.
+# Dá acesso apenas a este contêiner, não permite apagar e vence na data
+# de backup_sas_expiry. É um segredo: sai só como output "sensitive".
+data "azurerm_storage_account_blob_container_sas" "backups" {
+  connection_string = azurerm_storage_account.backups.primary_connection_string
+  container_name    = azurerm_storage_container.backups.name
+  https_only        = true
 
-resource "oci_objectstorage_bucket" "backups" {
-  compartment_id = var.compartment_ocid
-  namespace      = data.oci_objectstorage_namespace.this.namespace
-  name           = var.backup_bucket_name
-  access_type    = "NoPublicAccess"
-  versioning     = "Disabled"
-  freeform_tags  = local.tags
-}
+  start  = var.backup_sas_start
+  expiry = var.backup_sas_expiry
 
-# Link pré-autenticado usado pela VM do banco para enviar e baixar
-# dumps. Evita configurar usuários/políticas IAM dentro da VM.
-# É um segredo: sai apenas como output "sensitive".
-resource "oci_objectstorage_preauthrequest" "backups" {
-  namespace             = data.oci_objectstorage_namespace.this.namespace
-  bucket                = oci_objectstorage_bucket.backups.name
-  name                  = "${local.name}-backup-writer"
-  access_type           = "AnyObjectReadWrite"
-  bucket_listing_action = "ListObjects"
-  time_expires          = var.backup_par_expires
+  permissions {
+    read   = true
+    add    = true
+    create = true
+    write  = true
+    delete = false
+    list   = true
+  }
 }

@@ -6,7 +6,7 @@
 #
 #   KUBESHOP_MONGO_ROOT_PASSWORD   senha do administrador do MongoDB
 #   KUBESHOP_MONGO_APP_PASSWORD    senha do usuário da API
-#   KUBESHOP_BACKUP_PAR_URL        terraform output -raw backup_par_url
+#   KUBESHOP_BACKUP_SAS_URL        terraform output -raw backup_sas_url
 #
 # As tarefas que usam esses valores têm "no_log: true".
 # ==========================================================
@@ -25,12 +25,8 @@ mongo_app_username: kubeshop
 
 mongo_root_password: "{{ lookup('ansible.builtin.env', 'KUBESHOP_MONGO_ROOT_PASSWORD') }}"
 mongo_app_password: "{{ lookup('ansible.builtin.env', 'KUBESHOP_MONGO_APP_PASSWORD') }}"
-backup_par_url: "{{ lookup('ansible.builtin.env', 'KUBESHOP_BACKUP_PAR_URL') }}"
+backup_sas_url: "{{ lookup('ansible.builtin.env', 'KUBESHOP_BACKUP_SAS_URL') }}"
 
 # Endereços privados (vêm do inventário gerado pelo Terraform).
 app_private_ip: "{{ hostvars[groups['app'][0]].private_ip }}"
 db_private_ip: "{{ hostvars[groups['db'][0]].private_ip }}"
-
-# Portas liberadas no firewall local (iptables) de cada VM.
-# Cada grupo define a sua lista em group_vars/<grupo>.yml.
-firewall_allow: []

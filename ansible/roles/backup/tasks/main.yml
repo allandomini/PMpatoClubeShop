@@ -3,8 +3,8 @@
 #
 # - mongodump diário (systemd timer), compactado, no volume de
 #   dados em {{ backup_dir }}, com retenção local.
-# - Cópia externa no OCI Object Storage pelo link pré-autenticado
-#   do Terraform (se KUBESHOP_BACKUP_PAR_URL estiver definido).
+# - Cópia externa no Azure Blob Storage pelo link SAS do Terraform
+#   (se KUBESHOP_BACKUP_SAS_URL estiver definido).
 # - kubeshop-restore restaura um dump local ou do bucket.
 # ==========================================================
 
@@ -20,7 +20,8 @@
       BACKUP_DIR={{ backup_dir }}
       BACKUP_RETENTION_DAYS={{ backup_retention_days }}
       BACKUP_BUCKET_PREFIX={{ backup_bucket_prefix }}
-      BACKUP_PAR_URL={{ backup_par_url }}
+      # Entre aspas: o token SAS contém "&", que o shell trataria como comando em segundo plano.
+      BACKUP_SAS_URL='{{ backup_sas_url }}'
     owner: root
     group: root
     mode: "0600"
@@ -29,9 +30,9 @@
 - name: Avisa quando não há cópia externa configurada
   ansible.builtin.debug:
     msg: >-
-      KUBESHOP_BACKUP_PAR_URL não definido: os backups ficarão apenas
-      no volume de dados da VM. Defina-o para enviar cópias ao bucket.
-  when: backup_par_url | length == 0
+      KUBESHOP_BACKUP_SAS_URL não definido: os backups ficarão apenas
+      no volume de dados da VM. Defina-o para enviar cópias ao contêiner do Blob Storage.
+  when: backup_sas_url | length == 0
 
 - name: Instala os scripts de backup e restauração
   ansible.builtin.template:

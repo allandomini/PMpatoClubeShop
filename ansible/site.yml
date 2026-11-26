@@ -4,7 +4,7 @@
 #   cd ansible
 #   terraform -chdir=../terraform output -raw ansible_inventory > inventory.local.ini
 #   export KUBESHOP_MONGO_ROOT_PASSWORD=...  KUBESHOP_MONGO_APP_PASSWORD=...
-#   export KUBESHOP_BACKUP_PAR_URL="$(terraform -chdir=../terraform output -raw backup_par_url)"
+#   export KUBESHOP_BACKUP_SAS_URL="$(terraform -chdir=../terraform output -raw backup_sas_url)"
 #   ansible-playbook site.yml
 #
 # Ordem: banco primeiro (a API depende dele), depois a aplicação.

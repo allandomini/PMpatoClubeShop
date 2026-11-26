@@ -3,7 +3,7 @@
 # KubeShop - Backup do MongoDB (gerenciado pelo Ansible)
 #
 # Gera um dump compactado do banco da aplicação, confere a
-# integridade, envia uma cópia ao Object Storage (se configurado)
+# integridade, envia uma cópia ao Azure Blob Storage (se configurado)
 # e apaga dumps locais mais antigos que a retenção.
 #
 # Uso:  sudo kubeshop-backup [--no-upload]
@@ -59,13 +59,16 @@ echo "${sha256}  ${name}" > "${file}.sha256"
 log "dump local criado: ${name} (${bytes} bytes)"
 
 sent="nao"
-if [[ "${upload}" -eq 1 && -n "${BACKUP_PAR_URL:-}" ]]; then
-  # A URL contém um token: nunca é impressa.
+if [[ "${upload}" -eq 1 && -n "${BACKUP_SAS_URL:-}" ]]; then
+  # A URL contém o token SAS: nunca é impressa. Formato: https://conta.blob.core.windows.net/contêiner?token
+  blob_base="${BACKUP_SAS_URL%%\?*}"
+  blob_sas="${BACKUP_SAS_URL#*\?}"
   curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+    -X PUT -H "x-ms-blob-type: BlockBlob" -H "x-ms-version: 2023-11-03" \
     --upload-file "${file}" \
-    "${BACKUP_PAR_URL}${BACKUP_BUCKET_PREFIX}${name}" -o /dev/null
+    "${blob_base}/${BACKUP_BUCKET_PREFIX}${name}?${blob_sas}" -o /dev/null
   sent="sim"
-  log "cópia enviada ao Object Storage: ${BACKUP_BUCKET_PREFIX}${name}"
+  log "cópia enviada ao Blob Storage: ${BACKUP_BUCKET_PREFIX}${name}"
 fi
 
 # Retenção local (o bucket guarda as cópias externas).

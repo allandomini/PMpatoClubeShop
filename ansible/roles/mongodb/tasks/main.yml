@@ -3,7 +3,7 @@
 #
 # - Dados no volume em bloco do Terraform (sobrevive à VM).
 # - Container com rede do host, escutando só em 127.0.0.1 e no
-#   IP privado; o firewall local aceita apenas o IP da app.
+#   IP privado; o NSG da sub-rede aceita a porta só a partir da app.
 # - Usuário root só para administração/backup; a API usa um
 #   usuário com readWrite apenas no banco kubeshop.
 # ==========================================================
@@ -50,7 +50,7 @@
     state: directory
     mode: "0755"
 
-# _netdev e nofail: recomendação da Oracle para volumes anexados.
+# nofail: a VM inicia mesmo se o disco de dados demorar a aparecer (ex.: após troca de VM).
 - name: Registra a montagem no /etc/fstab
   ansible.builtin.lineinfile:
     path: /etc/fstab

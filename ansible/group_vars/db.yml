@@ -4,8 +4,8 @@
 
 db_base_dir: /opt/kubeshop-db
 
-# Volume em bloco criado pelo Terraform (anexo paravirtualizado).
-mongo_device: /dev/oracleoci/oraclevdb
+# Disco gerenciado criado pelo Terraform (LUN 0); o Azure mantém este link estável.
+mongo_device: /dev/disk/azure/scsi1/lun0
 mongo_mount_point: /srv/mongodb
 mongo_data_dir: "{{ mongo_mount_point }}/data"
 mongo_container_name: kubeshop-mongo
@@ -16,7 +16,3 @@ backup_retention_days: 7
 # Horário em UTC (06:00 UTC = 03:00 em Brasília).
 backup_schedule: "*-*-* 06:00:00"
 backup_bucket_prefix: kubeshop-db/
-
-# MongoDB aceita conexões apenas da VM da aplicação.
-firewall_allow:
-  - { port: "{{ mongo_port }}", source: "{{ app_private_ip }}/32", comment: "MongoDB a partir da app" }

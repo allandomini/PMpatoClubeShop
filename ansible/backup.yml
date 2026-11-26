@@ -60,7 +60,7 @@
           register: backup_local
           changed_when: false
 
-        - name: Dumps no Object Storage
+        - name: Dumps no Blob Storage
           ansible.builtin.command: /usr/local/sbin/kubeshop-restore --list-bucket
           register: backup_bucket
           changed_when: false

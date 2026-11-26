@@ -1,0 +1,131 @@
+# ==========================================================
+# KubeShop - Validação da infraestrutura (sem acesso à nuvem)
+#
+# Roda em todo pull request e push na main. Não usa segredos.
+# Operação "Validar" do escopo: verifica o código antes de qualquer
+# execução na nuvem. O "planejar" (terraform plan) fica em infra.yml.
+# ==========================================================
+name: Infra - validar
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-validar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    name: Terraform (fmt + validate)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.17.2"
+          terraform_wrapper: false
+
+      - name: Formatação
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init sem estado remoto
+        run: terraform init -backend=false -input=false -no-color
+
+      - name: Validação
+        run: terraform validate -no-color
+
+  ansible:
+    name: Ansible (syntax-check + lint)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ansible
+    env:
+      # Inventário modelo: suficiente para checar a sintaxe.
+      ANSIBLE_INVENTORY: inventory.ini
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instala ansible-core e ansible-lint
+        run: python -m pip install --quiet "ansible-core==2.21.6" "ansible-lint==26.11.1"
+
+      - name: Sintaxe dos playbooks
+        run: ansible-playbook --syntax-check site.yml backup.yml
+
+      - name: Lint (perfil production)
+        run: ansible-lint --profile production --offline site.yml backup.yml roles
+
+  scripts:
+    name: Scripts (shellcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shellcheck
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sc
+          cp ansible/roles/backup/templates/kubeshop-backup.j2  /tmp/sc/kubeshop-backup
+          cp ansible/roles/backup/templates/kubeshop-restore.j2 /tmp/sc/kubeshop-restore
+          shellcheck /tmp/sc/* roteiros/setup.sh .github/scripts/*.sh
+
+  local:
+    name: Execução de referência (Compose + smoke + navegador)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Sobe o ambiente local
+        run: node roteiros/setup.mjs --timeout 300
+
+      - name: Smoke test
+        run: node roteiros/smoke.mjs http://127.0.0.1:8080
+
+      - name: Testes de navegador
+        env:
+          BASE_URL: http://127.0.0.1:8080
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Persistência após reiniciar os serviços
+        run: |
+          set -euo pipefail
+          before="$(curl -fsS http://127.0.0.1:8080/api/orders | jq '.orders | length')"
+          docker compose restart
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/api/health/ready >/dev/null 2>&1 && break; sleep 2; done
+          after="$(curl -fsS http://127.0.0.1:8080/api/orders | jq '.orders | length')"
+          echo "Pedidos antes: ${before} | depois: ${after}"
+          test "${before}" -gt 0 && test "${before}" -eq "${after}"
+
+      - name: Logs em caso de falha
+        if: failure()
+        run: docker compose logs --tail=100
+
+      - name: Relatório do Playwright
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

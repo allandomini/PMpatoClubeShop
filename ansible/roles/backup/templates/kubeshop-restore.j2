@@ -27,10 +27,20 @@ list_local() {
   find "${BACKUP_DIR}" -maxdepth 1 -name 'kubeshop-*.archive.gz' -printf '%f\t%s bytes\n' | sort
 }
 
+# O link SAS tem o formato https://conta.blob.core.windows.net/contêiner?token
+blob_split() {
+  [[ -n "${BACKUP_SAS_URL:-}" ]] || die "BACKUP_SAS_URL não configurado"
+  blob_base="${BACKUP_SAS_URL%%\?*}"
+  blob_sas="${BACKUP_SAS_URL#*\?}"
+}
+
 list_bucket() {
-  [[ -n "${BACKUP_PAR_URL:-}" ]] || die "BACKUP_PAR_URL não configurado"
-  curl --fail --silent --show-error "${BACKUP_PAR_URL}?prefix=${BACKUP_BUCKET_PREFIX}" \
-    | jq -r '.objects[].name' | sed "s#^${BACKUP_BUCKET_PREFIX}##" | sort
+  blob_split
+  # A listagem do Blob Storage é XML: <Name>prefixo/arquivo</Name>.
+  curl --fail --silent --show-error -H "x-ms-version: 2023-11-03" \
+    "${blob_base}?restype=container&comp=list&prefix=${BACKUP_BUCKET_PREFIX}&${blob_sas}" \
+    | grep -o '<Name>[^<]*</Name>' | sed -e 's#<Name>##' -e 's#</Name>##' \
+    | sed "s#^${BACKUP_BUCKET_PREFIX}##" | sort
 }
 
 source_mode="local"
@@ -57,10 +67,10 @@ valid_name "${name}" || die "nome de dump inválido: ${name}"
 file="${BACKUP_DIR}/${name}"
 
 if [[ "${source_mode}" == "bucket" ]]; then
-  [[ -n "${BACKUP_PAR_URL:-}" ]] || die "BACKUP_PAR_URL não configurado"
-  log "baixando ${name} do Object Storage"
-  curl --fail --silent --show-error --retry 3 \
-    -o "${file}.download" "${BACKUP_PAR_URL}${BACKUP_BUCKET_PREFIX}${name}"
+  blob_split
+  log "baixando ${name} do Blob Storage"
+  curl --fail --silent --show-error --retry 3 -H "x-ms-version: 2023-11-03" \
+    -o "${file}.download" "${blob_base}/${BACKUP_BUCKET_PREFIX}${name}?${blob_sas}"
   mv "${file}.download" "${file}"
 fi
 

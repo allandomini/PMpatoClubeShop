@@ -1,0 +1,77 @@
+# ==========================================================
+# Ação composta: prepara o Ansible para operar as VMs
+#
+# Requer a ação preparar-azure antes (Terraform inicializado).
+#
+# - Instala o ansible-core em versão fixa.
+# - Carrega a chave SSH em um ssh-agent (nunca grava em disco).
+# - Gera o inventário a partir das saídas do Terraform.
+# - Exporta as senhas e a URL do backup (mascaradas nos logs).
+# - Abre o SSH temporário para o IP do runner. O job DEVE rodar
+#   ".github/scripts/acesso-ssh.sh fechar" com "if: always()".
+# ==========================================================
+name: Preparar Ansible
+description: Instala o Ansible, carrega credenciais e libera SSH temporário para o runner.
+
+inputs:
+  ssh-private-key:
+    required: true
+  mongo-root-password:
+    required: true
+  mongo-app-password:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Instala o Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+
+    - name: Instala o ansible-core
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --quiet --disable-pip-version-check "ansible-core==2.21.6"
+        ansible --version | head -n 1
+
+    - name: Carrega a chave SSH no ssh-agent
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        set -euo pipefail
+        eval "$(ssh-agent -s)" >/dev/null
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - >/dev/null 2>&1
+        {
+          echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}"
+          echo "SSH_AGENT_PID=${SSH_AGENT_PID}"
+        } >> "$GITHUB_ENV"
+        echo "Chave SSH carregada no agente."
+
+    - name: Gera o inventário e exporta os segredos
+      shell: bash
+      env:
+        ROOT_PW: ${{ inputs.mongo-root-password }}
+        APP_PW: ${{ inputs.mongo-app-password }}
+      run: |
+        set -euo pipefail
+        terraform -chdir=terraform output -raw ansible_inventory > ansible/inventory.local.ini
+
+        sas_url="$(terraform -chdir=terraform output -raw backup_sas_url)"
+        # Mascara a URL inteira e também só o token SAS (parte depois do "?").
+        echo "::add-mask::${sas_url}"
+        echo "::add-mask::${sas_url#*\?}"
+
+        {
+          echo "KUBESHOP_MONGO_ROOT_PASSWORD=${ROOT_PW}"
+          echo "KUBESHOP_MONGO_APP_PASSWORD=${APP_PW}"
+          echo "KUBESHOP_BACKUP_SAS_URL=${sas_url}"
+          echo "KUBESHOP_STORE_URL=$(terraform -chdir=terraform output -raw store_url)"
+          echo "ANSIBLE_FORCE_COLOR=1"
+        } >> "$GITHUB_ENV"
+
+    - name: Libera SSH temporário para o runner
+      shell: bash
+      run: bash .github/scripts/acesso-ssh.sh abrir

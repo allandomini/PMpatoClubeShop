@@ -1,0 +1,108 @@
+# ==========================================================
+# Ação composta: prepara o login no Azure e o Terraform
+#
+# - Autentica com um service principal (ARM_*), que o Terraform e o
+#   Azure CLI usam. As credenciais ficam só em variáveis de ambiente do
+#   job e nunca são impressas.
+# - Exporta as variáveis TF_VAR_*.
+# - Instala o Terraform e roda "terraform init" com o estado remoto no
+#   Azure Blob Storage (acesso por Microsoft Entra ID).
+# ==========================================================
+name: Preparar Azure e Terraform
+description: Faz login no Azure e inicializa o Terraform com o estado remoto.
+
+inputs:
+  client-id:
+    description: ID do aplicativo (service principal).
+    required: true
+  client-secret:
+    required: true
+  tenant-id:
+    required: true
+  subscription-id:
+    required: true
+  state-resource-group:
+    description: Grupo de recursos da conta que guarda o estado do Terraform.
+    required: true
+  state-storage-account:
+    required: true
+  state-container:
+    required: false
+    default: tfstate
+  location:
+    required: false
+    default: brazilsouth
+  ssh-public-key:
+    required: true
+  admin-cidrs:
+    description: Lista JSON, ex. ["203.0.113.10/32"].
+    required: true
+  backup-storage-account:
+    description: Nome da conta de armazenamento dos backups.
+    required: true
+  terraform-version:
+    required: false
+    default: "1.17.2"
+
+runs:
+  using: composite
+  steps:
+    - name: Exporta as credenciais e as variáveis do Terraform
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        CLIENT_SECRET: ${{ inputs.client-secret }}
+        TENANT_ID: ${{ inputs.tenant-id }}
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        LOCATION: ${{ inputs.location }}
+        SSH_PUBLIC_KEY: ${{ inputs.ssh-public-key }}
+        ADMIN_CIDRS: ${{ inputs.admin-cidrs }}
+        BACKUP_ACCOUNT: ${{ inputs.backup-storage-account }}
+      run: |
+        set -euo pipefail
+        echo "::add-mask::${CLIENT_SECRET}"
+        {
+          echo "TF_IN_AUTOMATION=1"
+          echo "TF_INPUT=0"
+          echo "ARM_CLIENT_ID=${CLIENT_ID}"
+          echo "ARM_CLIENT_SECRET=${CLIENT_SECRET}"
+          echo "ARM_TENANT_ID=${TENANT_ID}"
+          echo "ARM_SUBSCRIPTION_ID=${SUBSCRIPTION_ID}"
+          echo "TF_VAR_subscription_id=${SUBSCRIPTION_ID}"
+          echo "TF_VAR_location=${LOCATION}"
+          echo "TF_VAR_ssh_public_key=${SSH_PUBLIC_KEY}"
+          echo "TF_VAR_admin_cidrs=${ADMIN_CIDRS}"
+          echo "TF_VAR_backup_storage_account=${BACKUP_ACCOUNT}"
+        } >> "$GITHUB_ENV"
+
+    - name: Login no Azure CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        az login --service-principal \
+          --username="$ARM_CLIENT_ID" --password="$ARM_CLIENT_SECRET" --tenant="$ARM_TENANT_ID" \
+          --output none
+        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+        echo "Login no Azure feito na assinatura configurada."
+
+    - name: Instala o Terraform
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: Inicializa o Terraform com o estado remoto
+      shell: bash
+      working-directory: terraform
+      env:
+        STATE_RG: ${{ inputs.state-resource-group }}
+        STATE_ACCOUNT: ${{ inputs.state-storage-account }}
+        STATE_CONTAINER: ${{ inputs.state-container }}
+      run: |
+        set -euo pipefail
+        cat > backend.hcl <<HCL
+        resource_group_name  = "${STATE_RG}"
+        storage_account_name = "${STATE_ACCOUNT}"
+        container_name       = "${STATE_CONTAINER}"
+        HCL
+        terraform init -backend-config=backend.hcl -no-color

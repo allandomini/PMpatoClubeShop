@@ -3,57 +3,72 @@
 #
 #   terraform output                     (resumo)
 #   terraform output -raw ansible_inventory > ../ansible/inventory.local.ini
-#   terraform output -raw backup_par_url (segredo; não cole em logs)
+#   terraform output -raw backup_sas_url (segredo; não cole em logs)
 # ==========================================================
 
 output "store_url" {
   description = "Endereço público da loja."
-  value       = "http://${oci_core_instance.app.public_ip}"
+  value       = "http://${azurerm_public_ip.app.ip_address}"
 }
 
 output "app_public_ip" {
   description = "IP público da VM da aplicação."
-  value       = oci_core_instance.app.public_ip
+  value       = azurerm_public_ip.app.ip_address
+}
+
+output "app_fqdn" {
+  description = "Nome DNS gratuito do IP público (vazio se domain_name_label não foi definido)."
+  value       = azurerm_public_ip.app.fqdn
 }
 
 output "app_private_ip" {
   description = "IP privado da VM da aplicação."
-  value       = oci_core_instance.app.private_ip
+  value       = azurerm_network_interface.app.private_ip_address
 }
 
 output "db_private_ip" {
   description = "IP privado da VM do MongoDB (sem IP público)."
-  value       = oci_core_instance.db.private_ip
+  value       = azurerm_network_interface.db.private_ip_address
 }
 
 output "ssh_app" {
   description = "Comando SSH para a VM da aplicação."
-  value       = "ssh ubuntu@${oci_core_instance.app.public_ip}"
+  value       = "ssh ${var.admin_username}@${azurerm_public_ip.app.ip_address}"
 }
 
 output "ssh_db" {
   description = "Comando SSH para a VM do banco, passando pela VM da aplicação."
-  value       = "ssh -J ubuntu@${oci_core_instance.app.public_ip} ubuntu@${oci_core_instance.db.private_ip}"
+  value       = "ssh -J ${var.admin_username}@${azurerm_public_ip.app.ip_address} ${var.admin_username}@${azurerm_network_interface.db.private_ip_address}"
 }
 
-output "app_nsg_id" {
-  description = "NSG da VM da aplicação (o pipeline abre nela, temporariamente, o SSH para o IP do runner)."
-  value       = oci_core_network_security_group.app.id
+output "resource_group_name" {
+  description = "Grupo de recursos do ambiente."
+  value       = azurerm_resource_group.main.name
+}
+
+output "app_nsg_name" {
+  description = "NSG da aplicação (o pipeline abre nele, temporariamente, o SSH para o IP do runner)."
+  value       = azurerm_network_security_group.app.name
 }
 
 output "mongo_device_path" {
-  description = "Caminho do volume de dados dentro da VM do banco."
+  description = "Caminho do disco de dados dentro da VM do banco."
   value       = local.mongo_device_path
 }
 
-output "backup_bucket" {
-  description = "Bucket que recebe os dumps do MongoDB."
-  value       = oci_objectstorage_bucket.backups.name
+output "backup_storage_account" {
+  description = "Conta de armazenamento que recebe os dumps do MongoDB."
+  value       = azurerm_storage_account.backups.name
 }
 
-output "backup_par_url" {
-  description = "URL pré-autenticada do bucket de backups (SEGREDO)."
-  value       = "https://objectstorage.${var.region}.oraclecloud.com${oci_objectstorage_preauthrequest.backups.access_uri}"
+output "backup_container" {
+  description = "Contêiner que recebe os dumps do MongoDB."
+  value       = azurerm_storage_container.backups.name
+}
+
+output "backup_sas_url" {
+  description = "URL do contêiner de backups com o token SAS (SEGREDO)."
+  value       = "${azurerm_storage_account.backups.primary_blob_endpoint}${azurerm_storage_container.backups.name}${data.azurerm_storage_account_blob_container_sas.backups.sas}"
   sensitive   = true
 }
 
@@ -62,21 +77,23 @@ output "inventory" {
   value = {
     vms = {
       app = {
-        nome       = oci_core_instance.app.display_name
-        shape      = oci_core_instance.app.shape
-        ip_publico = oci_core_instance.app.public_ip
-        ip_privado = oci_core_instance.app.private_ip
+        nome       = azurerm_linux_virtual_machine.app.name
+        tamanho    = azurerm_linux_virtual_machine.app.size
+        ip_publico = azurerm_public_ip.app.ip_address
+        ip_privado = azurerm_network_interface.app.private_ip_address
       }
       db = {
-        nome       = oci_core_instance.db.display_name
-        shape      = oci_core_instance.db.shape
+        nome       = azurerm_linux_virtual_machine.db.name
+        tamanho    = azurerm_linux_virtual_machine.db.size
         ip_publico = "nenhum"
-        ip_privado = oci_core_instance.db.private_ip
+        ip_privado = azurerm_network_interface.db.private_ip_address
       }
     }
-    volume_dados_gb = oci_core_volume.mongo_data.size_in_gbs
-    vcn             = oci_core_vcn.main.cidr_blocks[0]
-    bucket_backups  = oci_objectstorage_bucket.backups.name
+    regiao            = azurerm_resource_group.main.location
+    disco_dados_gb    = azurerm_managed_disk.mongo_data.disk_size_gb
+    vnet              = var.vnet_cidr
+    conta_backups     = azurerm_storage_account.backups.name
+    conteiner_backups = azurerm_storage_container.backups.name
   }
 }
 
@@ -85,15 +102,15 @@ output "ansible_inventory" {
   value       = <<-EOT
     # Gerado por: terraform output -raw ansible_inventory
     [app]
-    kubeshop-app ansible_host=${oci_core_instance.app.public_ip} private_ip=${oci_core_instance.app.private_ip}
+    kubeshop-app ansible_host=${azurerm_public_ip.app.ip_address} private_ip=${azurerm_network_interface.app.private_ip_address}
 
     [db]
-    kubeshop-db ansible_host=${oci_core_instance.db.private_ip} private_ip=${oci_core_instance.db.private_ip}
+    kubeshop-db ansible_host=${azurerm_network_interface.db.private_ip_address} private_ip=${azurerm_network_interface.db.private_ip_address}
 
     [db:vars]
-    ansible_ssh_common_args='-o ProxyCommand="ssh -o StrictHostKeyChecking=accept-new -W %h:%p -q ubuntu@${oci_core_instance.app.public_ip}"'
+    ansible_ssh_common_args='-o ProxyCommand="ssh -o StrictHostKeyChecking=accept-new -W %h:%p -q ${var.admin_username}@${azurerm_public_ip.app.ip_address}"'
 
     [all:vars]
-    ansible_user=ubuntu
+    ansible_user=${var.admin_username}
   EOT
 }
