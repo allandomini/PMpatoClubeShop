@@ -1,0 +1,87 @@
+# ==========================================================
+# KubeShop - Configuração e implantação completas
+#
+#   cd ansible
+#   terraform -chdir=../terraform output -raw ansible_inventory > inventory.local.ini
+#   export KUBESHOP_MONGO_ROOT_PASSWORD=...  KUBESHOP_MONGO_APP_PASSWORD=...
+#   export KUBESHOP_BACKUP_PAR_URL="$(terraform -chdir=../terraform output -raw backup_par_url)"
+#   ansible-playbook site.yml
+#
+# Ordem: banco primeiro (a API depende dele), depois a aplicação.
+# É idempotente: rodar de novo só aplica o que mudou (atualização).
+#
+# Tags úteis:
+#   --tags app        reimplanta só a aplicação (nova versão)
+#   --tags verificar  só confere a saúde do ambiente
+# ==========================================================
+
+- name: Prepara todas as VMs
+  hosts: all
+  tags: [base]
+  roles:
+    - common
+    - docker
+
+- name: Configura o MongoDB na VM exclusiva
+  hosts: db
+  tags: [db]
+  roles:
+    - mongodb
+    - backup
+
+- name: Implanta a aplicação (Nginx + React + API)
+  hosts: app
+  tags: [app]
+  roles:
+    - app
+
+- name: Verifica o ambiente
+  hosts: app
+  become: false
+  tags: [verificar, app, db]
+  gather_facts: false
+  tasks:
+    - name: Aguarda a API ficar pronta e conectada ao banco
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}/api/health/ready"
+        return_content: true
+      register: site_ready
+      until: site_ready.status == 200 and site_ready.json.database
+      retries: 20
+      delay: 6
+      delegate_to: localhost
+
+    - name: Consulta a versão implantada
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}/api/info"
+      register: site_info
+      delegate_to: localhost
+
+    - name: Resultado
+      ansible.builtin.debug:
+        msg:
+          - "Loja no ar: http://{{ ansible_host }}"
+          - "Versão: {{ site_info.json.version }}"
+          - "Banco conectado: {{ site_ready.json.database }}"
+
+- name: Confirma o isolamento do banco (porta 27017 fechada para a internet)
+  hosts: app
+  become: false
+  tags: [verificar]
+  gather_facts: false
+  tasks:
+    # "stopped" só tem sucesso se a porta NÃO aceitar conexão.
+    - name: A porta 27017 não responde pelo IP público
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ mongo_port }}"
+        state: stopped
+        timeout: 10
+      delegate_to: localhost
+
+    - name: A VM da aplicação alcança o MongoDB pela rede privada
+      ansible.builtin.wait_for:
+        host: "{{ db_private_ip }}"
+        port: "{{ mongo_port }}"
+        state: started
+        timeout: 10

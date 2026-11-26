@@ -1,0 +1,99 @@
+# ==========================================================
+# KubeShop - Execução local (Docker Compose)
+#
+# Sobe os três serviços em uma única máquina, para desenvolvimento
+# e para a "execução de referência" exigida no diagnóstico:
+#
+#   web   -> Nginx + React (porta pública KUBESHOP_PORT, padrão 8080)
+#   api   -> Node.js / Express (sem porta publicada)
+#   mongo -> MongoDB autenticado (sem porta publicada)
+#
+# Em produção, o MongoDB roda em uma VM exclusiva; veja ansible/.
+#
+# Uso:
+#   cp .env.exemplo .env   (ou: node roteiros/setup.mjs)
+#   docker compose up -d --build
+# ==========================================================
+
+name: kubeshop
+
+services:
+  mongo:
+    image: mongo:8.2.12-noble
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?defina MONGO_ROOT_USERNAME no .env}
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-kubeshop}
+      MONGO_APP_USERNAME: ${MONGO_APP_USERNAME:?defina MONGO_APP_USERNAME no .env}
+      MONGO_APP_PASSWORD_FILE: /run/secrets/mongo_app_password
+    secrets:
+      - mongo_root_password
+      - mongo_app_password
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongodb/init-app-user.js:/docker-entrypoint-initdb.d/10-init-app-user.js:ro
+      - ./docker/mongodb/healthcheck.js:/usr/local/share/kubeshop/healthcheck.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--norc", "/usr/local/share/kubeshop/healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 6
+    networks:
+      - backend
+
+  api:
+    build:
+      context: ./aplicativos/backend
+    image: kubeshop-api:${APP_VERSION:-1.0.0}
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      MONGO_HOST: mongo
+      MONGO_PORT: "27017"
+      MONGO_DATABASE: ${MONGO_DATABASE:-kubeshop}
+      MONGO_USERNAME: ${MONGO_APP_USERNAME}
+      MONGO_PASSWORD_FILE: /run/secrets/mongo_app_password
+    secrets:
+      - mongo_app_password
+    networks:
+      - backend
+      - frontend
+
+  web:
+    build:
+      context: ./aplicativos/frontend
+    image: kubeshop-web:${APP_VERSION:-1.0.0}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${KUBESHOP_BIND:-127.0.0.1}:${KUBESHOP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks:
+      - frontend
+
+# Os segredos vêm de variáveis do .env e são montados como arquivos
+# em /run/secrets, nunca como variáveis visíveis em "docker inspect".
+secrets:
+  mongo_root_password:
+    environment: MONGO_ROOT_PASSWORD
+  mongo_app_password:
+    environment: MONGO_APP_PASSWORD
+
+volumes:
+  mongo-data:
+
+networks:
+  # O MongoDB fica só na rede "backend"; o Nginx só na "frontend".
+  backend:
+  frontend:

@@ -1,0 +1,48 @@
+# Gerenciado pelo Ansible (KubeShop) - não edite na VM.
+# Versão: {{ kubeshop_version }}
+name: kubeshop
+
+services:
+  api:
+    image: {{ app_api_image }}
+{% if not app_use_registry_images %}
+    build:
+      context: ./current/aplicativos/backend
+{% endif %}
+    restart: unless-stopped
+    environment:
+      APP_VERSION: "{{ kubeshop_version }}"
+      # Endereço PRIVADO da VM do banco (REQ-03).
+      MONGO_HOST: "{{ db_private_ip }}"
+      MONGO_PORT: "{{ mongo_port }}"
+      MONGO_DATABASE: {{ mongo_database }}
+      MONGO_USERNAME: {{ mongo_app_username }}
+      MONGO_PASSWORD_FILE: /run/secrets/mongo_app_password
+    volumes:
+      - {{ app_base_dir }}/secrets/mongo_app_password:/run/secrets/mongo_app_password:ro
+    networks:
+      - kubeshop
+
+  web:
+    image: {{ app_web_image }}
+{% if not app_use_registry_images %}
+    build:
+      context: ./current/aplicativos/frontend
+{% endif %}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "{{ app_public_port }}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks:
+      - kubeshop
+
+# O Nginx encontra a API pelo nome "api" no DNS interno do Docker.
+networks:
+  kubeshop:

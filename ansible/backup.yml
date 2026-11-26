@@ -1,0 +1,138 @@
+# ==========================================================
+# KubeShop - Backup e restauração do MongoDB
+#
+# Rotina cotidiana (não remove dados):
+#   ansible-playbook backup.yml                       faz um backup agora
+#   ansible-playbook backup.yml -e acao=listar        lista dumps locais e do bucket
+#   ansible-playbook backup.yml -e acao=verificar     falha se o último backup tiver mais de 36 h
+#
+# Rotina que SUBSTITUI os dados (exige confirmação explícita):
+#   ansible-playbook backup.yml -e acao=restaurar -e confirmar=SIM
+#   ansible-playbook backup.yml -e acao=restaurar -e arquivo=kubeshop-20261125T060000Z.archive.gz -e confirmar=SIM
+#   ansible-playbook backup.yml -e acao=restaurar -e origem=bucket -e arquivo=NOME -e confirmar=SIM
+#
+# Toda restauração faz antes um backup de segurança do estado atual.
+# ==========================================================
+
+- name: Backup e restauração do MongoDB
+  hosts: db
+  gather_facts: false
+  vars:
+    acao: backup          # backup | listar | verificar | restaurar
+    arquivo: latest       # nome do dump ou "latest"
+    origem: local         # local | bucket
+    confirmar: "NAO"
+    idade_maxima: 36h     # usado por acao=verificar
+
+  tasks:
+    - name: Valida os parâmetros
+      ansible.builtin.assert:
+        that:
+          - acao in ['backup', 'listar', 'verificar', 'restaurar']
+          - origem in ['local', 'bucket']
+          - acao != 'restaurar' or confirmar == 'SIM'
+          - not (origem == 'bucket' and arquivo == 'latest')
+        fail_msg: >-
+          Parâmetros inválidos. A restauração substitui os dados atuais e exige
+          -e confirmar=SIM; com origem=bucket informe -e arquivo=NOME
+          (veja: -e acao=listar).
+        quiet: true
+
+    # ------------------------------------------------------
+    - name: Faz o backup agora
+      when: acao == 'backup'
+      block:
+        - name: Executa o kubeshop-backup
+          ansible.builtin.command: /usr/local/sbin/kubeshop-backup
+          register: backup_run
+          changed_when: true
+
+        - name: Resultado do backup
+          ansible.builtin.debug:
+            msg: "{{ backup_run.stdout_lines | select('search', 'BACKUP_OK|enviada|removidos') | list }}"
+
+    # ------------------------------------------------------
+    - name: Lista os backups disponíveis
+      when: acao == 'listar'
+      block:
+        - name: Dumps no volume da VM
+          ansible.builtin.command: /usr/local/sbin/kubeshop-restore --list
+          register: backup_local
+          changed_when: false
+
+        - name: Dumps no Object Storage
+          ansible.builtin.command: /usr/local/sbin/kubeshop-restore --list-bucket
+          register: backup_bucket
+          changed_when: false
+          failed_when: false
+
+        - name: Backups disponíveis
+          ansible.builtin.debug:
+            msg:
+              local: "{{ backup_local.stdout_lines }}"
+              bucket: "{{ backup_bucket.stdout_lines if backup_bucket.rc == 0 else 'indisponível: ' ~ (backup_bucket.stderr | default('')) }}"
+
+    # ------------------------------------------------------
+    - name: Confere se o backup automático está em dia
+      when: acao == 'verificar'
+      block:
+        - name: Procura backups recentes (exceto os pre-restore)
+          ansible.builtin.find:
+            paths: "{{ backup_dir }}"
+            patterns: "kubeshop-2*.archive.gz"
+            age: "-{{ idade_maxima }}"
+          register: backup_recent
+
+        # O módulo systemd não informa o próximo disparo de um timer.
+        - name: Situação do agendamento  # noqa: command-instead-of-module
+          ansible.builtin.command: systemctl list-timers kubeshop-backup.timer --no-pager
+          register: backup_timer
+          changed_when: false
+
+        - name: Exige ao menos um backup dentro do prazo
+          ansible.builtin.assert:
+            that: backup_recent.matched > 0
+            success_msg: >-
+              OK: {{ backup_recent.matched }} backup(s) com menos de {{ idade_maxima }};
+              mais recente: {{ (backup_recent.files | sort(attribute='mtime') | last).path | basename }}
+            fail_msg: "Nenhum backup com menos de {{ idade_maxima }}. Veja: journalctl -u kubeshop-backup"
+
+        - name: Próximas execuções agendadas
+          ansible.builtin.debug:
+            var: backup_timer.stdout_lines
+
+    # ------------------------------------------------------
+    - name: Restaura um backup
+      when: acao == 'restaurar'
+      block:
+        - name: Executa o kubeshop-restore
+          ansible.builtin.command:
+            argv: "{{ ['/usr/local/sbin/kubeshop-restore']
+                      + (['--from-bucket'] if origem == 'bucket' else [])
+                      + [arquivo, '--yes'] }}"
+          register: restore_run
+          changed_when: true
+
+        - name: Resultado da restauração
+          ansible.builtin.debug:
+            msg: "{{ restore_run.stdout_lines | select('search', 'RESTORE_OK|BACKUP_OK') | list }}"
+
+- name: Confere os dados pela API após a restauração
+  hosts: app
+  gather_facts: false
+  become: false
+  vars:
+    acao: backup
+  tasks:
+    - name: Consulta o histórico de pedidos
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}/api/orders"
+        return_content: true
+      register: backup_orders
+      delegate_to: localhost
+      when: acao == 'restaurar'
+
+    - name: Pedidos visíveis na loja
+      ansible.builtin.debug:
+        msg: "A API retorna {{ backup_orders.json.orders | length }} pedido(s) após a restauração."
+      when: acao == 'restaurar'

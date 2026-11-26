@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# ==========================================================
+# KubeShop - Backup do MongoDB (gerenciado pelo Ansible)
+#
+# Gera um dump compactado do banco da aplicação, confere a
+# integridade, envia uma cópia ao Object Storage (se configurado)
+# e apaga dumps locais mais antigos que a retenção.
+#
+# Uso:  sudo kubeshop-backup [--no-upload]
+# Saída final (evidência): "BACKUP_OK nome=... bytes=... sha256=... enviado=..."
+# Nenhuma credencial é impressa.
+# ==========================================================
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source /etc/kubeshop-backup.env
+
+upload=1
+kind=""
+for arg in "$@"; do
+  case "${arg}" in
+    --no-upload) upload=0 ;;
+    # Backup automático feito antes de uma restauração: nome próprio,
+    # para não ser escolhido como "latest" numa restauração seguinte.
+    --pre-restore) kind="pre-restore-" ;;
+    *) echo "uso: kubeshop-backup [--no-upload] [--pre-restore]" >&2; exit 2 ;;
+  esac
+done
+
+log() { echo "[kubeshop-backup] $(date -u +%FT%TZ) $*"; }
+
+# Impede duas execuções simultâneas.
+exec 9>/run/lock/kubeshop-backup.lock
+flock -n 9 || { log "outra execução em andamento; saindo"; exit 1; }
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+name="kubeshop-${kind}${timestamp}.archive.gz"
+file="${BACKUP_DIR}/${name}"
+
+log "iniciando dump do banco ${MONGO_DATABASE}"
+
+docker exec "${MONGO_CONTAINER}" mongodump \
+  --quiet \
+  --port "${MONGO_PORT}" \
+  --username "${MONGO_ROOT_USERNAME}" \
+  --config /run/secrets/mongo_tools.yaml \
+  --authenticationDatabase admin \
+  --db "${MONGO_DATABASE}" \
+  --gzip \
+  --archive="/backups/${name}.partial"
+
+# Confere se o arquivo compactado está íntegro antes de aceitá-lo.
+gzip -t "${file}.partial"
+mv "${file}.partial" "${file}"
+
+bytes="$(stat -c %s "${file}")"
+sha256="$(sha256sum "${file}" | cut -d' ' -f1)"
+echo "${sha256}  ${name}" > "${file}.sha256"
+log "dump local criado: ${name} (${bytes} bytes)"
+
+sent="nao"
+if [[ "${upload}" -eq 1 && -n "${BACKUP_PAR_URL:-}" ]]; then
+  # A URL contém um token: nunca é impressa.
+  curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+    --upload-file "${file}" \
+    "${BACKUP_PAR_URL}${BACKUP_BUCKET_PREFIX}${name}" -o /dev/null
+  sent="sim"
+  log "cópia enviada ao Object Storage: ${BACKUP_BUCKET_PREFIX}${name}"
+fi
+
+# Retenção local (o bucket guarda as cópias externas).
+removed="$(find "${BACKUP_DIR}" -maxdepth 1 -name 'kubeshop-*.archive.gz*' \
+  -mtime +"${BACKUP_RETENTION_DAYS}" -print -delete | wc -l)"
+log "dumps locais removidos pela retenção de ${BACKUP_RETENTION_DAYS} dias: ${removed}"
+
+echo "BACKUP_OK nome=${name} bytes=${bytes} sha256=${sha256} enviado=${sent}"

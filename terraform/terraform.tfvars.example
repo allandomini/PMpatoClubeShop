@@ -1,0 +1,34 @@
+# ==========================================================
+# KubeShop - Exemplo de variáveis do Terraform
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars está no .gitignore. Não coloque chaves privadas
+# aqui: use ~/.oci/config ou TF_VAR_private_key no pipeline.
+# ==========================================================
+
+# Console OCI > Perfil > Tenancy > OCID
+tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Console OCI > Identity > Compartments > OCID
+compartment_ocid = "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+region = "sa-saopaulo-1"
+
+# Perfil do ~/.oci/config (uso local). Remova se usar TF_VAR_*.
+oci_config_profile = "DEFAULT"
+
+# Conteúdo da chave pública (cat ~/.ssh/id_ed25519.pub)
+ssh_public_key = "ssh-ed25519 AAAA... equipe-kubeshop"
+
+# Seu IP público com /32 (curl -s https://ifconfig.me)
+admin_cidrs = ["203.0.113.10/32"]
+
+# Dimensionamento (cabe no Always Free: até 4 OCPU / 24 GB no total)
+instance_shape = "VM.Standard.A1.Flex"
+app_ocpus      = 1
+app_memory_gb  = 6
+db_ocpus       = 1
+db_memory_gb   = 6
+
+mongo_data_volume_gb = 50

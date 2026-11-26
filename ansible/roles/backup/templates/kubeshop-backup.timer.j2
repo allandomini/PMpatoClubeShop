@@ -1,0 +1,12 @@
+# Gerenciado pelo Ansible (KubeShop)
+[Unit]
+Description=KubeShop - agendamento diário do backup do MongoDB
+
+[Timer]
+OnCalendar={{ backup_schedule }} UTC
+# Executa assim que possível se a VM estava desligada no horário.
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
